@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3 - 2026-08-30
+
+- P1: the live approval capability now captures the EXACT approved content (project_id, note/promotion IDs, full target kind/ref/path, mode, before/after/payload hashes, planned_at, approved_at, approving principal). `promote()` verifies the capability against both the on-disk approval record (read again under lock) and the incoming request before any canonical write; editing the approval record after minting (approve-A-then-write-B) is refused, closing the approve/replay TOCTOU hole.
+- P2: trigger condition values strictly follow the JSON Schema — `milestone 'in'` requires a non-empty string[] with non-empty items; `milestone equals/not_equals` and `dependency status_equals` require non-empty strings; `status_in` accepts a non-empty string or a non-empty string[]; invalid values now reject capture/update and quarantine hand-edited notes.
+- P2: promoted targets must be regular files (not directories or device nodes); `scan()` and `reconcile()` now report `PROMOTE_TARGET_INVALID` and quarantine such notes instead of treating them as trusted.
+- P2: `writeFileAtomicBatch` now restores already-committed files to their captured original content if a later rename fails (best-effort all-or-nothing); staging failures still leave every target untouched.
+- Tests: 37 -> 41 (capability rebinding, trigger value schema, directory target, batch staging/rollback).
+
 ## 0.2.2 - 2026-08-30
 
 - P1: `validatePromotionPlan()` now takes the project `cwd` and enforces project-relative, symlink-safe, existing-file checks on `target.path`; `recordPromotionApproval()` re-derives the safe relative target instead of trusting plan bytes, so a forged plan can no longer make it read outside the project.

@@ -350,18 +350,28 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
         return
       }
       const p = `trigger.conditions[${i}]`
+      const checkStringList = (value: unknown): boolean =>
+        Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item !== '')
+      const checkNonEmptyString = (value: unknown): boolean => typeof value === 'string' && value.trim() !== ''
       if (c.kind === 'milestone') {
         if (typeof c.key !== 'string' || c.key === '') bad(p + '.key', 'must be non-empty')
         const op = c.operator ?? 'equals'
         if (!['equals', 'not_equals', 'in'].includes(op)) bad(p + '.operator', `unknown operator ${op}`)
-        if (op === 'in' && !Array.isArray(c.value)) bad(p + '.value', 'operator "in" requires string[]')
-        if (op !== 'in' && typeof c.value !== 'string') bad(p + '.value', 'requires a string value')
+        if (op === 'in' && !checkStringList(c.value)) bad(p + '.value', 'operator "in" requires a non-empty string[] with non-empty items')
+        if (op !== 'in' && !checkNonEmptyString(c.value)) bad(p + '.value', 'requires a non-empty string value')
       } else if (c.kind === 'dependency') {
         if (typeof c.key !== 'string' || c.key === '') bad(p + '.key', 'must be non-empty')
         const op = c.operator ?? 'status_in'
         if (!['status_in', 'status_equals'].includes(op)) bad(p + '.operator', `unknown operator ${op}`)
-        if (op === 'status_in' && !Array.isArray(c.value) && typeof c.value !== 'string')
-          bad(p + '.value', 'requires string[] or string')
+        if (op === 'status_in') {
+          if (typeof c.value === 'string') {
+            if (c.value.trim() === '') bad(p + '.value', 'requires a non-empty string')
+          } else if (!checkStringList(c.value)) {
+            bad(p + '.value', 'requires a non-empty string or a non-empty string[] with non-empty items')
+          }
+        } else if (!checkNonEmptyString(c.value)) {
+          bad(p + '.value', 'status_equals requires a non-empty string value')
+        }
       } else {
         bad(p + '.kind', `unknown condition kind ${(c as TriggerCondition).kind}`)
       }
@@ -906,11 +916,17 @@ export class ProjectMemory {
         try {
           const rel = assertProjectRelativePath(this.cwd, targetPath, 'promotion target')
           rejectSymlinkComponents(this.cwd, path.join(this.cwd, rel), 'promotion target', 'INCONSISTENT')
-          if (hyd.note.promotion.status === 'promoted' && !fs.existsSync(path.join(this.cwd, rel))) {
-            throw new ProjectMemoryError(
-              'INCONSISTENT',
-              `promotion target missing for promoted note: ${rel}`,
-            )
+          if (hyd.note.promotion.status === 'promoted') {
+            const abs = path.join(this.cwd, rel)
+            if (!fs.existsSync(abs)) {
+              throw new ProjectMemoryError('INCONSISTENT', `promotion target missing for promoted note: ${rel}`)
+            }
+            if (!fs.statSync(abs).isFile()) {
+              throw new ProjectMemoryError(
+                'INCONSISTENT',
+                `promotion target is not a regular file for promoted note: ${rel} (${fs.statSync(abs).isDirectory() ? 'directory' : 'non-regular'})`,
+              )
+            }
           }
         } catch (error) {
           errors.push({
@@ -1389,12 +1405,16 @@ export class ProjectMemory {
 
   /** Persist a single-use approval only after a trusted UI has confirmed the plan.
    *
-   * Trust boundary: this Core API intentionally trusts the caller's `approvedBy`
-   * claim. Only the Pi Extension path (which requires ctx.hasUI and a direct
-   * confirm dialog before reaching this method) is an approved approval source;
-   * channel is pinned to 'pi-ui' and id must be a session URI, so ad-hoc Core
-   * callers cannot mint durable approvals on behalf of a UI without explicitly
-   * impersonating the live Pi session channel.
+   * Trust boundary (recorded assumption): this Core API asserts, but cannot
+   * prove, that the caller performed a live user confirmation. The real UI
+   * gate lives in the Pi Extension layer (ctx.hasUI + direct confirm dialog +
+   * exact-bytes display). Core pinning here means: channel must be 'pi-ui', the
+   * principal id must be a pi-session:// URI, and the approval is bound to the
+   * exact confirmed bytes via a process-local live capability that is
+   * re-verified before every canonical write. If arbitrary in-process
+   * extensions are part of your threat model, treat any Core caller as already
+   * trusted with user-level authority; the durable proof of "the user clicked
+   * confirm" is the extension's receipt record, not this method.
    */
   recordPromotionApproval(
     plan: PromotionPlan,
@@ -1425,16 +1445,6 @@ export class ProjectMemory {
         actual: current === null ? null : sha256hex(current),
       })
     const approvalRef = `pa_${crypto.randomBytes(16).toString('hex')}`
-    // Register the single-use capability in-process. Only a live UI
-    // confirmation that reached this method can mint it; a hand-crafted
-    // approval JSON on disk has no capability and cannot be consumed.
-    registerLiveApproval(approvalRef, {
-      note_id: plan.note_id,
-      promotion_id: plan.promotion_id,
-      before_sha256: plan.before_sha256,
-      after_sha256: plan.after_sha256,
-      payload_sha256: plan.payload_sha256,
-    })
     const record: PromotionApprovalRecord = {
       schema_version: 1,
       approval_ref: approvalRef,
@@ -1453,6 +1463,23 @@ export class ProjectMemory {
       consumed_at: null,
     }
     writeJsonExclusive(approvalRecordPath(this.cwd, approvalRef), record)
+    // Register the single-use capability in-process, bound to the EXACT approved
+    // bytes. Only a live UI confirmation that reached this method can mint it;
+    // a hand-crafted approval JSON on disk has no capability and cannot be
+    // consumed, and editing this record afterwards breaks the binding.
+    registerLiveApproval(approvalRef, {
+      project_id: cfg.project_id,
+      note_id: plan.note_id,
+      promotion_id: plan.promotion_id,
+      target: plan.target,
+      mode: plan.mode,
+      payload_sha256: plan.payload_sha256,
+      before_sha256: plan.before_sha256,
+      after_sha256: plan.after_sha256,
+      planned_at: plan.planned_at,
+      approved_at: record.approved_at,
+      approved_by: record.approved_by.id,
+    })
     return record
   }
 
@@ -1467,18 +1494,23 @@ export class ProjectMemory {
       throw new ProjectMemoryError('INVALID_INPUT', `approval_ref ${opts.approval_ref} does not exist`)
     // The approval file on disk is NOT proof of approval: only a capability
     // minted in this process (after the user confirmed the exact bytes in the
-    // live Pi UI) can authorize the canonical write. Replayed verifications
-    // of an already-promoted note are still allowed if the record is consumed.
+    // live Pi UI) can authorize the canonical write, and it must still match
+    // BOTH the disk record and this request field by field. Replayed
+    // verifications of an already-promoted note may proceed without a live
+    // capability because no canonical write happens on that path.
     const liveCapability = getLiveApproval(opts.approval_ref)
-    if (!liveCapability && initialApproval.status !== 'consumed')
+    const prepared = resolvePromotionTarget(this.cwd, opts)
+    collectSecrets(cfg, { target: prepared.target, payload: prepared.payload }, '$promotion')
+    assertApprovalBinding(initialApproval, cfg.project_id, id, opts, prepared)
+    if (liveCapability) {
+      assertLiveCapabilityMatchesApproval(liveCapability, initialApproval, cfg.project_id, id, opts, prepared)
+    } else if (initialApproval.status !== 'consumed') {
       throw new ProjectMemoryError(
         'POLICY_VIOLATION',
         'approval_ref has no live capability in this process — re-confirm the exact target bytes through the Pi UI',
         { approval_ref: opts.approval_ref },
       )
-    const prepared = resolvePromotionTarget(this.cwd, opts)
-    collectSecrets(cfg, { target: prepared.target, payload: prepared.payload }, '$promotion')
-    assertApprovalBinding(initialApproval, cfg.project_id, id, opts, prepared)
+    }
 
     const targetLock = promoteLockPath(this.cwd, prepared.rel)
     const targetFd = acquireLockFile(targetLock, {
@@ -1499,6 +1531,10 @@ export class ProjectMemory {
         const approval = readApprovalRecord(this.cwd, opts.approval_ref)
         if (!approval) throw new ProjectMemoryError('INCONSISTENT', 'approval record disappeared during promote')
         assertApprovalBinding(approval, cfg.project_id, id, opts, prepared)
+        // Re-check the live capability against the record read under the lock:
+        // the file could have been edited between the initial check and now.
+        if (liveCapability)
+          assertLiveCapabilityMatchesApproval(liveCapability, approval, cfg.project_id, id, opts, prepared)
 
         const noteLock = noteLockPath(this.cwd, id)
         const noteFd = acquireLockFile(
@@ -1956,6 +1992,13 @@ export class ProjectMemory {
               noteId: note.id,
               message: `promoted target file missing: ${targetRel}`,
             })
+          } else if (!fs.statSync(abs).isFile()) {
+            issues.push({
+              severity: 'error',
+              code: 'PROMOTE_TARGET_INVALID',
+              noteId: note.id,
+              message: `promoted target is not a regular file: ${targetRel} (${fs.statSync(abs).isDirectory() ? 'directory' : 'non-regular'})`,
+            })
           } else {
             const ok = backlinkExists(this.cwd, note.id, pro.promotion_id!, targetRel, pro.backlink)
             if (!ok)
@@ -2395,11 +2438,17 @@ function validateApprovalRecord(record: PromotionApprovalRecord, projectId: stri
 /* ------------------------------------------------------------------ */
 
 interface LiveCapability {
+  project_id: string
   note_id: string
   promotion_id: string
+  target: CanonicalTarget
+  mode: PromotionMode
+  payload_sha256: string
   before_sha256: string
   after_sha256: string
-  payload_sha256: string
+  planned_at: string
+  approved_at: string
+  approved_by: string
 }
 
 /**
@@ -2408,6 +2457,12 @@ interface LiveCapability {
  * process by recordPromotionApproval() (which itself requires a live Pi UI
  * confirmation) can authorize the canonical mutation. The registry is
  * process-local; a restarted session must re-confirm before promoting.
+ *
+ * The capability captures the EXACT approved content (note/promotion ids,
+ * full target, mode and before/after/payload hashes). promote() compares the
+ * capability against both the on-disk approval record and the live request;
+ * if either was altered after confirmation, the write is refused — being
+ * approved once does not carry over to different bytes.
  */
 const liveApprovalCapabilities = new Map<string, LiveCapability>()
 
@@ -2421,6 +2476,49 @@ function getLiveApproval(approvalRef: string): LiveCapability | null {
 
 function unregisterLiveApproval(approvalRef: string): void {
   liveApprovalCapabilities.delete(approvalRef)
+}
+
+/**
+ * Verify the capability is bound to the EXACT bytes the user confirmed.
+ * Called before every canonical write: a capability only marks "this process
+ * approved this exact plan", so the on-disk record and the incoming request
+ * must both still match it field by field. This closes the approve-A-then-
+ * edit-B race: rewriting the approval file to content B produces a mismatch
+ * against the capability (which still holds A), and promote refuses.
+ */
+function assertLiveCapabilityMatchesApproval(
+  capability: LiveCapability,
+  approval: PromotionApprovalRecord,
+  projectId: string,
+  noteId: string,
+  request: PromotionRequest,
+  prepared: ResolvedPromotionTarget,
+): void {
+  const mismatches: string[] = []
+  if (capability.project_id !== projectId) mismatches.push('cap.project_id')
+  if (capability.note_id !== noteId) mismatches.push('cap.note_id')
+  if (capability.promotion_id !== request.promotion_id) mismatches.push('cap.promotion_id')
+  if (capability.target.kind !== prepared.target.kind || capability.target.ref !== prepared.target.ref || capability.target.path !== prepared.rel)
+    mismatches.push('cap.target')
+  if (capability.mode !== prepared.mode) mismatches.push('cap.mode')
+  if (capability.payload_sha256 !== sha256hex(prepared.payload)) mismatches.push('cap.payload_sha256')
+  if (capability.before_sha256 !== approval.before_sha256) mismatches.push('cap.before_sha256')
+  if (capability.after_sha256 !== approval.after_sha256) mismatches.push('cap.after_sha256')
+  if (capability.payload_sha256 !== approval.payload_sha256) mismatches.push('cap.payload_sha256_vs_approval')
+  if (capability.target.path !== approval.target.path) mismatches.push('cap.target_vs_approval')
+  if (capability.target.kind !== approval.target.kind) mismatches.push('cap.target_kind_vs_approval')
+  if (capability.mode !== approval.mode) mismatches.push('cap.mode_vs_approval')
+  if (capability.note_id !== approval.note_id) mismatches.push('cap.note_vs_approval')
+  if (capability.promotion_id !== approval.promotion_id) mismatches.push('cap.promotion_vs_approval')
+  if (capability.planned_at !== approval.planned_at) mismatches.push('cap.planned_at')
+  if (capability.approved_at !== approval.approved_at) mismatches.push('cap.approved_at')
+  if (capability.approved_by !== approval.approved_by.id) mismatches.push('cap.approved_by')
+  if (mismatches.length)
+    throw new ProjectMemoryError(
+      'POLICY_VIOLATION',
+      `approved content no longer matches the live capability (${mismatches.join(', ')}) — re-confirm through the Pi UI`,
+      { approval_ref: approval.approval_ref, mismatches },
+    )
 }
 
 function readApprovalRecord(cwd: string, approvalRef: string): PromotionApprovalRecord | null {

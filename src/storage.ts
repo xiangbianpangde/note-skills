@@ -406,17 +406,21 @@ export function writeFileAtomic(file: string, content: string): void {
 }
 
 /**
- * Batch compare-free atomic commit: every file is first written + fsynced to a
- * unique temp path in its own directory. Only after ALL temp writes succeed are
- * they renamed into place. Any failure during the temp phase leaves the target
- * paths untouched; a failure mid-rename removes the remaining temps (already
- * renamed files keep their new content — they were fully written before the
- * rename). This gives a best-effort all-or-nothing commit for small derived
- * registries like pending-capture envelopes.
+ * Best-effort all-or-nothing batch commit for small derived registries.
+ *
+ * Phase 1 (staging): every file is written + fsynced to a unique temp path in
+ * its own directory while the ORIGINAL content is captured. Any staging
+ * failure removes all temps and leaves every target untouched.
+ *
+ * Phase 2 (commit): temps are renamed into place in order. If a rename fails
+ * mid-way, files already renamed are restored to their captured original
+ * content (atomic write), the remaining temps are removed, and the original
+ * error is rethrown — restoring the store to its pre-commit state unless the
+ * restore itself fails (disk-level fault, unrecoverable).
  */
 export function writeFileAtomicBatch(files: Array<{ file: string; content: string }>): void {
   if (files.length === 0) return
-  const staged: Array<{ tmp: string; file: string }> = []
+  const staged: Array<{ tmp: string; file: string; original: string | null }> = []
   try {
     for (const { file, content } of files) {
       const dir = path.dirname(file)
@@ -444,7 +448,7 @@ export function writeFileAtomicBatch(files: Array<{ file: string; content: strin
         }
         throw e
       }
-      staged.push({ tmp, file })
+      staged.push({ tmp, file, original: tryReadText(file) })
     }
   } catch (e) {
     // Aborted during staging: remove every staged temp; targets untouched.
@@ -457,13 +461,32 @@ export function writeFileAtomicBatch(files: Array<{ file: string; content: strin
     }
     throw e
   }
-  for (const { tmp, file } of staged) {
+  const renamed: Array<{ file: string; original: string | null }> = []
+  for (const item of staged) {
     try {
-      fs.renameSync(tmp, file)
+      fs.renameSync(item.tmp, item.file)
+      renamed.push({ file: item.file, original: item.original })
     } catch (e) {
-      // Leave remaining temps for diagnostics; the already-renamed files were
-      // fully staged and are valid. This is a partial-but-safe commit: every
-      // written file is complete, never truncated.
+      // Roll back files already committed in this batch, then drop remaining temps.
+      for (const done of renamed.reverse()) {
+        try {
+          if (done.original === null) {
+            fs.unlinkSync(done.file)
+          } else {
+            writeFileAtomic(done.file, done.original)
+          }
+        } catch {
+          /* restore is best-effort on top of the failing rename */
+        }
+      }
+      // Remove temps whose rename never happened (the failed one + all later).
+      for (const pending of staged) {
+        try {
+          fs.unlinkSync(pending.tmp)
+        } catch {
+          /* ignore */
+        }
+      }
       throw e
     }
   }

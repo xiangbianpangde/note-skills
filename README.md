@@ -44,4 +44,6 @@ Then initialize an opted-in project with the `project_memory` tool action `init`
 
 ## MVP capability boundary
 
-Version 0.2.0 uses exact metadata filters, prompt-term relevance ranking, and trusted canonical-state triggers. It does not include embeddings, a graph database, a daemon, automatic scientific adjudication, or cross-project federation. Promote requires a content-bound single-use UI approval; pending capture candidates persist durably under `.project-memory/pending/`.
+Version 0.2.3 uses exact metadata filters, prompt-term relevance ranking, and trusted canonical-state triggers. It does not include embeddings, a graph database, a daemon, automatic scientific adjudication, or cross-project federation. Promote requires a content-bound single-use UI approval whose process-local capability is re-verified against the exact approved bytes before every canonical write; pending capture candidates persist durably under `.project-memory/pending/`.
+
+**Trust boundary (recorded):** the Core API asserts but cannot prove that a live user confirmation occurred; the real UI gate (direct confirm dialog over exact target bytes) lives in the Pi Extension layer. Core pins the approval channel to `pi-ui` and requires a `pi-session://` principal, which prevents ad-hoc Core callers from minting approvals. If arbitrary in-process extensions belong to your threat model, treat Core callers as already trusted with user-level authority — the durable proof of "the user clicked confirm" is the extension's receipt record.

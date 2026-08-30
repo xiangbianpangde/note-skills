@@ -11,6 +11,7 @@ import {
   ProjectMemoryError,
   parseNoteFile,
   serializeNote,
+  writeFileAtomicBatch,
   writeNoteFile,
   type CaptureInput,
   type NoteType,
@@ -914,4 +915,170 @@ test("concurrent identical captures create one active fingerprint and merge ever
   assert.equal(hits.length, 1);
   assert.equal(hits[0]!.note.source_refs.length, 12);
   assert.equal(memory.reconcile().issues.some((issue) => issue.code === "DUPLICATE_FINGERPRINT"), false);
+});
+
+test("live capability is rebound: editing the approval record after minting is refused", () => {
+  const { cwd, memory } = fixture();
+  const captured = memory.capture(input("idea", "rebind"));
+  const request = {
+    promotion_id: "rebind-1",
+    target: { kind: "spec" as const, path: "SPEC.md" },
+    insertBlock: "## Approved content A\n",
+  };
+  const plan = memory.planPromotion(captured.id, request);
+  const approval = memory.recordPromotionApproval(plan, {
+    kind: "human",
+    id: "pi-session://rebind",
+    channel: "pi-ui",
+  });
+
+  // Attacker edits the on-disk approval record to different bytes B.
+  const approvalsDir = path.join(cwd, ".project-memory", "approvals");
+  const approvalFile = path.join(approvalsDir, `${approval.approval_ref}.json`);
+  const tampered = JSON.parse(fs.readFileSync(approvalFile, "utf8")) as {
+    planned_at: string;
+    approved_at: string;
+    payload_sha256: string;
+    after_sha256: string;
+  };
+  // Tamper a binding-neutral field first (planned_at is not checked by
+  // assertApprovalBinding, only by the live-capability comparison).
+  tampered.planned_at = new Date(Date.parse(tampered.planned_at) + 1_000_000).toISOString();
+  fs.writeFileSync(approvalFile, JSON.stringify(tampered, null, 2) + "\n");
+  expectCode(
+    () => memory.promote(captured.id, { ...request, approval_ref: approval.approval_ref }),
+    "POLICY_VIOLATION",
+  );
+  assert.equal(fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8"), "# Canonical Spec\n");
+  assert.equal(memory.read(captured.id)!.note.promotion.status, "not_promoted");
+
+  // Tampering a binding-checked field (payload_sha256) is refused as CONFLICT.
+  const secondTamper = JSON.parse(fs.readFileSync(approvalFile, "utf8")) as typeof tampered;
+  secondTamper.payload_sha256 = "e".repeat(64);
+  fs.writeFileSync(approvalFile, JSON.stringify(secondTamper, null, 2) + "\n");
+  expectCode(
+    () => memory.promote(captured.id, { ...request, approval_ref: approval.approval_ref }),
+    "CONFLICT",
+  );
+  const third = JSON.parse(fs.readFileSync(approvalFile, "utf8")) as typeof tampered;
+  assert.equal(fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8"), "# Canonical Spec\n");
+  assert.equal(memory.read(captured.id)!.note.promotion.status, "not_promoted");
+});
+
+test("trigger condition values strictly follow the schema (non-empty string lists / strings)", () => {
+  const { memory } = fixture();
+  expectCode(
+    () =>
+      memory.capture({
+        ...input("deferred_work", "bad-trigger-list"),
+        trigger: { conditions: [{ kind: "milestone", key: "P0", operator: "in", value: [123] as never }] },
+      }),
+    "INVALID_INPUT",
+  );
+  expectCode(
+    () =>
+      memory.capture({
+        ...input("deferred_work", "bad-trigger-in-empty"),
+        trigger: { conditions: [{ kind: "milestone", key: "P0", operator: "in", value: [] }] },
+      }),
+    "INVALID_INPUT",
+  );
+  expectCode(
+    () =>
+      memory.capture({
+        ...input("deferred_work", "bad-trigger-status_equals"),
+        trigger: { conditions: [{ kind: "dependency", key: "PM-QUE-9999", operator: "status_equals", value: 123 as never }] },
+      }),
+    "INVALID_INPUT",
+  );
+  expectCode(
+    () =>
+      memory.capture({
+        ...input("deferred_work", "bad-trigger-empty-string"),
+        trigger: { conditions: [{ kind: "milestone", key: "P0", operator: "equals", value: "" }] },
+      }),
+    "INVALID_INPUT",
+  );
+  // Hand-edited note with a bad trigger value is quarantined at read.
+  const captured = memory.capture(input("idea", "bad-trigger-edit"));
+  const file = memory.read(captured.id)!;
+  file.note.trigger = { conditions: [{ kind: "milestone", key: "P0", operator: "equals", value: 123 as never }] };
+  writeNoteFile(file.file, file.note, file.body);
+  assert.equal(memory.read(captured.id), null);
+  assert.ok(memory.reconcile().issues.some((issue) => issue.code === "SCHEMA" && /trigger/.test(issue.message)));
+});
+
+test("promoted target directory is quarantined as PROMOTE_TARGET_INVALID", () => {
+  const { cwd, memory } = fixture();
+  const captured = memory.capture(input("idea", "target-dir"));
+  const plan = memory.planPromotion(captured.id, {
+    promotion_id: "target-dir-1",
+    target: { kind: "spec", path: "SPEC.md" },
+    insertBlock: "## Dir target\n",
+  });
+  const approval = memory.recordPromotionApproval(plan, {
+    kind: "human",
+    id: "pi-session://target-dir",
+    channel: "pi-ui",
+  });
+  fs.rmSync(path.join(cwd, "SPEC.md"));
+  fs.mkdirSync(path.join(cwd, "SPEC.md"));
+  expectCode(
+    () =>
+      memory.promote(captured.id, {
+        approval_ref: approval.approval_ref,
+        promotion_id: "target-dir-1",
+        target: { kind: "spec", path: "SPEC.md" },
+        insertBlock: "## Dir target\n",
+      }),
+    "INVALID_INPUT",
+  );
+  // Hand-mark the note as promoted targeting the directory; it must be quarantined.
+  const file = memory.read(captured.id)!;
+  file.note.status = "promoted";
+  file.note.promotion = {
+    status: "promoted",
+    target: { kind: "spec", ref: "SPEC.md", path: "SPEC.md" },
+    promotion_id: "target-dir-1",
+    promoted_at: new Date().toISOString(),
+    backlink: "in_file",
+    backlink_verified: true,
+  };
+  writeNoteFile(file.file, file.note, file.body);
+  assert.equal(memory.read(captured.id), null);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "PROMOTE_TARGET_INVALID"));
+});
+
+test("writeFileAtomicBatch commits all-or-nothing: staging failure leaves targets untouched", () => {
+  const { cwd } = fixture();
+  const fileA = path.join(cwd, "batch-a.json");
+  const fileB = path.join(cwd, "batch-b.json");
+  fs.writeFileSync(fileA, "A0\n");
+  fs.writeFileSync(fileB, "B0\n");
+  // Force a staging failure on the second file by making its directory a file.
+  const blocker = path.join(cwd, "batch-dir");
+  fs.writeFileSync(blocker, "blocker");
+  const target = path.join(blocker, "child.json");
+  assert.throws(
+    () =>
+      writeFileAtomicBatch([
+        { file: fileA, content: "A1\n" },
+        { file: target, content: "C1\n" },
+      ]),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "EEXIST",
+  );
+  assert.equal(fs.readFileSync(fileA, "utf8"), "A0\n");
+  assert.equal(fs.readFileSync(fileB, "utf8"), "B0\n");
+  // Successful batch replaces both and leaves no temp files.
+  writeFileAtomicBatch([
+    { file: fileA, content: "A2\n" },
+    { file: fileB, content: "B2\n" },
+  ]);
+  assert.equal(fs.readFileSync(fileA, "utf8"), "A2\n");
+  assert.equal(fs.readFileSync(fileB, "utf8"), "B2\n");
+  assert.deepEqual(
+    fs.readdirSync(cwd).filter((name) => name.startsWith(".pm-tmp-")),
+    [],
+  );
 });

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3 - 2026-08-30
+
+- Promotion approval is bound to the exact approved content in-process and re-verified against the on-disk record and the live request before every canonical write; editing the approval after confirmation is refused.
+- Trigger values follow the JSON Schema strictly (non-empty strings / string lists), including `status_equals`.
+- Promoted targets must be regular files; directories and device nodes are quarantined as `PROMOTE_TARGET_INVALID`.
+- Pending batch commits restore earlier files if a rename fails mid-commit.
+
 ## 0.2.2 - 2026-08-30
 
 - Promotion approval is now a process-local single-use capability, not just a JSON file: only a live Pi UI confirmation in the same process can mint a consumable approval_ref.
