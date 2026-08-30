@@ -55,7 +55,9 @@ function extensionHarness() {
 test("extension registers one memory tool, lifecycle gates, and user commands", () => {
   const { tools, commands, events } = extensionHarness();
   assert.equal(tools.length, 1);
-  assert.equal(tools[0]!.name, "project_memory");
+  const parameters = (tools[0] as unknown as { parameters: { properties?: Record<string, unknown> } }).parameters;
+  assert.equal(parameters.properties?.approved, undefined);
+  assert.ok(parameters.properties?.candidate_ids);
   assert.deepEqual(new Set(commands), new Set(["project-memory-init", "project-memory-reconcile"]));
   for (const event of ["session_start", "before_agent_start", "agent_settled", "agent_end", "session_before_compact"]) {
     assert.ok(events.has(event), `missing event ${event}`);
@@ -92,10 +94,46 @@ test("task-start retrieval is bounded and explicitly non-authoritative", () => {
   assert.deepEqual(result.message.details, { authority: "memory", trusted: false });
 });
 
-test("an uncaptured durable signal emits a mandatory follow-up and blocks one compaction", () => {
+test("before_agent_start uses the actual prompt to retrieve older relevant memory", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-prompt-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "extension-prompt" });
+  const relevant = memory.capture({
+    type: "decision",
+    title: "Database migration strategy",
+    summary: "Use a reversible database migration",
+    rationale: "Rollback safety matters",
+    next_action: "Apply when database migration work resumes",
+    source_refs: [{ kind: "manual", ref: "test://old-relevant" }],
+  });
+  for (let index = 0; index < 8; index += 1) {
+    memory.capture({
+      type: "risk",
+      title: `Recent UI risk ${index}`,
+      summary: `Unrelated rendering concern ${index}`,
+      rationale: "Recent but irrelevant",
+      next_action: "Review UI",
+      source_refs: [{ kind: "manual", ref: `test://recent/${index}` }],
+    });
+  }
+  const { events } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-prompt", getLeafId: () => "leaf-prompt" },
+  };
+  const result = events.get("before_agent_start")!({ prompt: "Implement the database migration" }, ctx) as {
+    message?: { content?: string };
+  };
+  assert.match(result.message?.content ?? "", new RegExp(relevant.id));
+  assert.doesNotMatch(result.message?.content ?? "", /Recent UI risk/);
+});
+
+test("an uncaptured durable signal persists candidate envelopes before fail-open compaction", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-gate-"));
   new ProjectMemory(cwd).init({ project_id: "extension-gate" });
-  const { events, sent } = extensionHarness();
+  const { events, sent, entries } = extensionHarness();
   const ctx = {
     cwd,
     hasUI: false,
@@ -105,19 +143,38 @@ test("an uncaptured durable signal emits a mandatory follow-up and blocks one co
   events.get("agent_end")!({ messages: [{ role: "user", content: "P1 后续再考虑插件" }] }, ctx);
   assert.equal(sent.length, 1);
   assert.equal((sent[0] as { customType: string }).customType, "project-memory-capture-gate");
+  const pending = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.ok(pending.length >= 1);
+  assert.match(pending[0]!.candidate_id, /^cand_[0-9a-f]{32}$/);
+  assert.match(pending[0]!.source_ref.ref, /^pi-session:\/\//);
+  assert.ok(pending[0]!.source_excerpt.length > 0);
   assert.deepEqual(events.get("session_before_compact")!({}, ctx), { cancel: true });
   assert.equal(events.get("session_before_compact")!({}, ctx), undefined);
+  const failOpen = entries.find(
+    (entry) => (entry as { data?: { status?: string } }).data?.status === "failed-open-after-retry-limit",
+  ) as { data: { candidates: Array<{ candidate_id: string; type: string; source_excerpt: string }> } };
+  assert.ok(failOpen);
+  assert.equal(failOpen.data.candidates[0]!.candidate_id, pending[0]!.candidate_id);
+  assert.ok(failOpen.data.candidates[0]!.source_excerpt.length > 0);
 });
 
 test("a successful capture suppresses the end-of-run duplicate gate", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-test-"));
   new ProjectMemory(cwd).init({ project_id: "extension-test" });
   const { tools, events, sent, entries } = extensionHarness();
+  let approvalPrompt = "";
   const ctx = {
     cwd,
     model: { id: "test-model" },
-    hasUI: false,
-    ui: { setStatus() {}, notify() {} },
+    hasUI: true,
+    ui: {
+      setStatus() {},
+      notify() {},
+      confirm: async (_title: string, message: string) => {
+        approvalPrompt = message;
+        return true;
+      },
+    },
     sessionManager: {
       getSessionId: () => "session-test",
       getLeafId: () => "leaf-test",
@@ -153,7 +210,6 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
     {
       action: "promote",
       id: receipt.data.id,
-      approved: true,
       promotion_id: "extension-promote-1",
       promotion_mode: "replace_file",
       promotion_content: "# Approved canonical definition",
@@ -165,6 +221,10 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
     ctx as never,
   );
   const canonical = fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8");
+  assert.match(approvalPrompt, /Before SHA-256:/);
+  assert.match(approvalPrompt, /After SHA-256:/);
+  assert.match(approvalPrompt, /BEGIN EXACT APPROVED TARGET/);
+  assert.match(approvalPrompt, /# Approved canonical definition/);
   assert.match(canonical, /^# Approved canonical definition/);
   assert.doesNotMatch(canonical, /Old canonical|Duplicate section/);
   const promoteReceipt = entries[1] as {

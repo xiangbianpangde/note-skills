@@ -31,6 +31,8 @@ export const NOTES_DIR = 'notes'
 export const INDEX_DIR = 'index'
 export const BACKLINKS_DIR = 'backlinks'
 export const LOCKS_DIR = 'locks'
+export const APPROVALS_DIR = 'approvals'
+export const PENDING_DIR = 'pending'
 
 export const TYPE_DIR: Record<NoteType, string> = {
   deferred_work: 'deferred',
@@ -64,6 +66,14 @@ export function backlinksDir(cwd: string): string {
 
 export function locksDir(cwd: string): string {
   return path.join(memoryRoot(cwd), LOCKS_DIR)
+}
+
+export function approvalsDir(cwd: string): string {
+  return path.join(memoryRoot(cwd), APPROVALS_DIR)
+}
+
+export function pendingDir(cwd: string): string {
+  return path.join(memoryRoot(cwd), PENDING_DIR)
 }
 
 export function assertProjectDir(cwd: string): void {
@@ -142,6 +152,8 @@ export function assertMemoryRootSafe(cwd: string): void {
     [indexDir(cwd), '.project-memory/index'],
     [backlinksDir(cwd), '.project-memory/backlinks'],
     [locksDir(cwd), '.project-memory/locks'],
+    [approvalsDir(cwd), '.project-memory/approvals'],
+    [pendingDir(cwd), '.project-memory/pending'],
     ...TYPE_DIRS.map((d) => [path.join(notesRoot(cwd), d), `.project-memory/notes/${d}`] as [string, string]),
   ]
   for (const [abs, label] of targets) {
@@ -170,6 +182,8 @@ export function ensureMemoryDirs(cwd: string): void {
   fs.mkdirSync(indexDir(cwd), { recursive: true })
   fs.mkdirSync(backlinksDir(cwd), { recursive: true })
   fs.mkdirSync(locksDir(cwd), { recursive: true })
+  fs.mkdirSync(approvalsDir(cwd), { recursive: true })
+  fs.mkdirSync(pendingDir(cwd), { recursive: true })
 }
 
 /* ------------------------------------------------------------------ */
@@ -575,6 +589,34 @@ export function writeNoteFile(file: string, note: Note, body: string): void {
   writeFileAtomic(file, serializeNote(note, body))
 }
 
+/**
+ * Compare-and-swap a note revision. Callers must also hold the per-note lock;
+ * the hash check catches manual/non-cooperating edits made after the read.
+ */
+export function writeNoteFileCas(
+  file: string,
+  expectedSha256: string,
+  note: Note,
+  body: string,
+): string {
+  const current = tryReadText(file)
+  if (current === null)
+    throw new ProjectMemoryError('CONFLICT', `note changed or disappeared before write: ${file}`, { file })
+  const actualSha256 = sha256hex(current)
+  if (actualSha256 !== expectedSha256)
+    throw new ProjectMemoryError('CONFLICT', `note changed after it was read; retry against the latest revision`, {
+      file,
+      expectedSha256,
+      actualSha256,
+    })
+  const content = serializeNote(note, body)
+  writeFileAtomic(file, content)
+  const written = tryReadText(file)
+  if (written === null || sha256hex(written) !== sha256hex(content))
+    throw new ProjectMemoryError('INTERNAL', `note write-then-readback failed: ${file}`, { file })
+  return sha256hex(content)
+}
+
 /* ------------------------------------------------------------------ */
 /* Derived index (§15.3, invariant 9)                                  */
 /* ------------------------------------------------------------------ */
@@ -814,30 +856,60 @@ export function promoteLockPath(cwd: string, relTarget: string): string {
   return path.join(locksDir(cwd), `promote-${sha256hex(relTarget).slice(0, 16)}.lock`)
 }
 
+export function fingerprintLockPath(cwd: string, fingerprint: string): string {
+  return path.join(locksDir(cwd), `fingerprint-${sha256hex(fingerprint).slice(0, 24)}.lock`)
+}
+
+export function noteLockPath(cwd: string, noteId: string): string {
+  return path.join(locksDir(cwd), `note-${noteId}.lock`)
+}
+
+export function approvalLockPath(cwd: string, approvalRef: string): string {
+  return path.join(locksDir(cwd), `approval-${approvalRef}.lock`)
+}
+
+export function pendingLockPath(cwd: string): string {
+  return path.join(locksDir(cwd), 'pending-captures.lock')
+}
+
+export interface LockOptions {
+  /** Bounded wait for cooperating short transactions; zero means fail fast. */
+  waitMs?: number
+  retryMs?: number
+}
+
+const LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4))
+
 /**
- * Acquire an exclusive cross-process lock ('wx'). EEXIST fails immediately
- * with CONFLICT (no waiting, no retries): a concurrent promote transaction on
- * the same canonical target is in progress. Metadata (pid, timestamps, note,
- * promotion_id) is written into the lock file for diagnostics and for
- * reconcile's stale-lock reporting.
+ * Acquire an O_EXCL cross-process lock and persist diagnostics. Locks are never
+ * silently stolen: a crashed owner is surfaced by reconcile instead of risking
+ * two simultaneous writers. Short capture/note operations may wait boundedly.
  */
 export function acquireLockFile(
   lockPath: string,
-  meta: { note_id: string; promotion_id: string; target: string },
+  meta: Record<string, unknown>,
+  opts: LockOptions = {},
 ): number {
   fs.mkdirSync(path.dirname(lockPath), { recursive: true })
+  const waitMs = Math.max(0, opts.waitMs ?? 0)
+  const retryMs = Math.max(1, opts.retryMs ?? 10)
+  const deadline = Date.now() + waitMs
   let fd: number
-  try {
-    fd = fs.openSync(lockPath, 'wx')
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new ProjectMemoryError(
-        'CONFLICT',
-        `another promote transaction holds the lock for this canonical target (${path.basename(lockPath)}) — it must finish or be reconciled before retrying`,
-        { lock: lockPath, requestedNote: meta.note_id, requestedPromotion: meta.promotion_id },
-      )
+  while (true) {
+    try {
+      fd = fs.openSync(lockPath, 'wx')
+      break
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+      if (Date.now() >= deadline) {
+        throw new ProjectMemoryError(
+          'CONFLICT',
+          `another transaction holds ${path.basename(lockPath)} — retry after it finishes or reconcile a crashed lock`,
+          { lock: lockPath, ...meta },
+        )
+      }
+      Atomics.wait(LOCK_SLEEP, 0, 0, Math.min(retryMs, Math.max(1, deadline - Date.now())))
     }
-    throw e
   }
   try {
     const payload = JSON.stringify({

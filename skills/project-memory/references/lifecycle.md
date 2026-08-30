@@ -12,15 +12,16 @@ SKILL.md 的步骤 2–5 引用本文件。
 - 每条候选结果只能是 `captured`（新建或合并）或 `skipped`（含理由）；六类各自记 `none` 表示讨论中未出现。
 - 去重：先取确定性候选集（同 project、同 type、关联同一对象、处于活动状态），再语义判断是否同一对象。合并只追加来源/关系/新信息，不改写旧 rationale；语义实质变化时用 `supersedes` 建 revision。
 - 幂等：同一讨论重复执行 Gate 不得产生重复 note；重试时先查已有对象。
+- 持久化：agent_end 钩子把候选写成 `.project-memory/pending/<envelope>.json`（脱敏摘要 + 来源引用 + 哈希）；capture/acknowledge 必须带 `candidate_ids` 逐条解析。
 - 写入失败：如实记入 receipt 的 `errors`，不得报成功；不无限重试。
 
 ## 2. 检索流程（任务开始）
 
-1. 查询优先级：精确 ID → 结构化过滤（type/status/priority/tags/trigger due）→ 关系遍历（depends_on 等）→ 全文关键词。
+1. 查询优先级：到期 trigger → 精确 ID → 结构化过滤（type/status/priority/tags）→ 与当前 `event.prompt` 词项的相关性排序（加权字段评分，旧但相关的笔记优先）→ 全文关键词。
 2. 默认过滤终态与 `superseded`/`rejected`/`archived`。
 3. 两阶段读取：第一阶段只注入摘要 envelope；按需再展开全文；原始讨论仅在需要判断理由或歧义时展开。
 
-Result Envelope 必含字段：`id`、`type`、`status`、`authority`、`relevance_reason`（非空）、`summary`、`next_action`、`source_refs`、`canonical_conflict`。
+Result Envelope 必含字段：`id`、`type`、`status`、`review_status`、`authority`、`relevance_reason`（非空）、`summary`、`next_action`、`source_refs`、`canonical_conflict`。`canonical_conflicts` 适配器输出（来自 canonical state 文件，非笔记自述）会把命中置为 `needs_review`，但不改写笔记生命周期状态。
 
 预算：第一阶段注入总量保持在小型任务可承受范围（经验值 ≤ 数 KB），防止记忆层本身成为上下文噪声。
 
@@ -38,15 +39,16 @@ Result Envelope 必含字段：`id`、`type`、`status`、`authority`、`relevan
 2. 确定 canonical 目标与治理规则
 3. 生成精确 diff 或新对象草稿
 4. 校验权限、依赖与冲突
-5. 获得用户显式批准（必须），并明确写入模式：新对象用 `append_block`；已有定义用 `replace_file` + 完整批准内容
-6. 原子写入 canonical；禁止以追加方式修改已有定义并留下新旧两段
-7. 回读目标 ID/版本/哈希
-8. note 置 status=promoted、promotion 记录目标与 promotion_id
-9. 目标加 derived_from=<note ID> 双向链接
-10. 重建索引并跑 Reconcile
+5. planPromotion() 生成精确 before/after 字节与 SHA-256，并在 Pi UI 展示完整目标内容
+6. 获得用户直接 UI 确认后，记录一次性内容绑定 approval_ref（before_sha256/after_sha256/目标/模式/载荷哈希），明确写入模式：新对象用 `append_block`；已有定义用 `replace_file` + 完整批准内容
+7. promote() 在 approval+note+target 三重锁内 CAS 校验目标未变、消费 approval_ref、原子写入 canonical；禁止以追加方式修改已有定义并留下新旧两段
+8. 回读目标 ID/版本/哈希
+9. note 置 status=promoted、promotion 记录目标与 promotion_id
+10. 目标加 derived_from=<note ID> 双向链接
+11. 重建索引并跑 Reconcile
 ```
 
-不变量：目标或写入模式不明不自动新建/修改规范；只改 note 状态但未成功写入并回读目标 = 失败；同一 `promotion_id` 重试不产生重复对象；不同 Note 并发 Promote 到同一目标只能有一个成功；promote 后 note 保留历史但停止作为活动建议；默认检索改为返回正式目标摘要。Capture/Promote 的确定性 receipt 必须绑定真实 `tool_call_id`，模型自述不算工具证据。
+不变量：目标或写入模式不明不自动新建/修改规范；目标在批准后被并发改写 = CONFLICT 且不覆盖；只改 note 状态但未成功写入并回读目标 = 失败；同一 `promotion_id` 重试不产生重复对象；同一 `approval_ref` 只能消费一次；不同 Note 并发 Promote 到同一目标只能有一个成功；promote 后 note 保留历史但停止作为活动建议。Capture/Promote 的确定性 receipt 必须绑定真实 `tool_call_id`，模型自述不算工具证据。
 
 ## 5. Reconcile
 

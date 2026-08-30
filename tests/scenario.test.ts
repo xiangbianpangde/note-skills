@@ -81,12 +81,14 @@ process.stdout.write(JSON.stringify({
     `
 const pm = new ProjectMemory(process.env.PM_CWD);
 const due = pm.taskStartRetrieval({state:pm.loadCanonicalState(),limit:10}).due;
-const promoted = pm.promote(process.env.PM_ID, {
-  approved:true,
+const request = {
   promotion_id:'scenario-promote-1',
   target:{kind:'backlog',path:'BACKLOG.md'},
   insertBlock:'## Multi-agent scheduling\\n\\nReview after P0; source Project Memory '+process.env.PM_ID+'.'
-});
+};
+const plan = pm.planPromotion(process.env.PM_ID, request);
+const approval = pm.recordPromotionApproval(plan, {kind:'human',id:'scenario-user',channel:'test'});
+const promoted = pm.promote(process.env.PM_ID, {...request, approval_ref:approval.approval_ref});
 process.stdout.write(JSON.stringify({due:due.map(x=>x.id),promotion:promoted.status}));
 `,
     { PM_ID: deferredId },

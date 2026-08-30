@@ -58,6 +58,20 @@ function expectCode(fn: () => unknown, code: string): void {
   assert.throws(fn, (error: unknown) => error instanceof ProjectMemoryError && error.code === code);
 }
 
+function approvePromotion(
+  memory: ProjectMemory,
+  id: string,
+  request: Parameters<ProjectMemory["planPromotion"]>[1],
+): Parameters<ProjectMemory["promote"]>[1] {
+  const plan = memory.planPromotion(id, request);
+  const approval = memory.recordPromotionApproval(plan, {
+    kind: "human",
+    id: "test-user",
+    channel: "test",
+  });
+  return { ...request, approval_ref: approval.approval_ref };
+}
+
 test("uninitialized projects fail closed on read and retrieval paths", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-uninitialized-"));
   const memory = new ProjectMemory(cwd);
@@ -135,6 +149,59 @@ test("accepted decisions need evidence and secrets fail closed", () => {
   );
 });
 
+test("trusted reads quarantine invalid authority, foreign project IDs, and empty IDs", () => {
+  const { memory } = fixture();
+  const authority = memory.capture(input("idea", "manual-authority"));
+  const foreign = memory.capture(input("risk", "foreign-project"));
+  const empty = memory.capture(input("decision", "empty-id"));
+
+  const authorityFile = memory.read(authority.id)!;
+  authorityFile.note.authority = "canonical" as never;
+  writeNoteFile(authorityFile.file, authorityFile.note, authorityFile.body);
+  const foreignFile = memory.read(foreign.id)!;
+  foreignFile.note.project_id = "foreign-project";
+  writeNoteFile(foreignFile.file, foreignFile.note, foreignFile.body);
+  const emptyFile = memory.read(empty.id)!;
+  emptyFile.note.id = "";
+  writeNoteFile(emptyFile.file, emptyFile.note, emptyFile.body);
+
+  assert.equal(memory.read(authority.id), null);
+  assert.equal(memory.read(foreign.id), null);
+  assert.equal(memory.read(empty.id), null);
+  assert.equal(memory.search({ includeTerminal: true }).length, 0);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "SCHEMA" && issue.file === authorityFile.file));
+  assert.ok(report.issues.some((issue) => issue.code === "PROJECT_ID_MISMATCH" && issue.file === foreignFile.file));
+  assert.ok(report.issues.some((issue) => issue.code === "SCHEMA" && issue.file === emptyFile.file && /id:/.test(issue.message)));
+});
+
+test("secret policy recursively scans nested capture/update fields and quarantines manual edits", () => {
+  const { memory } = fixture();
+  expectCode(
+    () =>
+      memory.capture({
+        ...input("deferred_work", "nested-secret"),
+        trigger: {
+          conditions: [
+            { kind: "milestone", key: "release", operator: "equals", value: "token=supersecretvalue123456" },
+          ],
+        },
+      }),
+    "POLICY_VIOLATION",
+  );
+
+  const captured = memory.capture(input("idea", "manual-nested-secret"));
+  expectCode(
+    () => memory.update(captured.id, { relations: { related_to: ["token=supersecretvalue123456"] } }),
+    "POLICY_VIOLATION",
+  );
+  const file = memory.read(captured.id)!;
+  file.note.created_by.id = "token=supersecretvalue123456";
+  writeNoteFile(file.file, file.note, file.body);
+  assert.equal(memory.search({ id: captured.id, includeTerminal: true }).length, 0);
+  assert.ok(memory.reconcile().issues.some((issue) => issue.code === "SECRET_POLICY" && issue.noteId === captured.id));
+});
+
 test("triggers use configured canonical state and unknown dependencies stay unresolved", () => {
   const { memory } = fixture();
   const due = memory.capture(input("deferred_work", "due"));
@@ -151,16 +218,68 @@ test("triggers use configured canonical state and unknown dependencies stay unre
   assert.deepEqual(evaluation.unresolved.map((item) => item.id), [unresolved.id]);
 });
 
+test("task-start retrieval ranks an older prompt-relevant note above newer unrelated notes", () => {
+  const { memory } = fixture();
+  const relevant = memory.capture({
+    ...input("risk", "database-migration"),
+    title: "Database migration rollback",
+    summary: "Preserve the rollback plan for the database migration",
+  });
+  for (let index = 0; index < 8; index += 1) {
+    memory.capture(input("risk", `unrelated-ui-${index}`));
+  }
+  const retrieval = memory.taskStartRetrieval({
+    text: "Implement the database migration rollback",
+    types: ["risk"],
+    limit: 3,
+  });
+  assert.equal(retrieval.active[0]?.note.id, relevant.id);
+  assert.ok(retrieval.active[0]?.relevanceTerms?.includes("database"));
+  assert.equal(retrieval.active.some((hit) => /unrelated-ui/.test(hit.note.title)), false);
+});
+
+test("trusted canonical conflict evidence produces needs_review without overwriting lifecycle status", () => {
+  const { cwd, memory } = fixture();
+  const decision = memory.capture(input("decision", "canonical-conflict"));
+  fs.writeFileSync(
+    path.join(cwd, "state.yaml"),
+    [
+      "milestones:",
+      "  P0: complete",
+      "canonical_conflicts:",
+      `  ${decision.id}:`,
+      "    canonical_ref: SPEC.md#current-policy",
+      "    reason: Canonical policy now requires a different choice",
+      "",
+    ].join("\n"),
+  );
+  const state = memory.loadCanonicalState()!;
+  const retrieval = memory.taskStartRetrieval({
+    state,
+    text: "canonical conflict",
+    types: ["decision"],
+  });
+  const hit = retrieval.active.find((item) => item.note.id === decision.id)!;
+  assert.equal(hit.reviewStatus, "needs_review");
+  assert.equal(hit.canonicalConflict?.canonical_ref, "SPEC.md#current-policy");
+  assert.equal(memory.read(decision.id)!.note.status, "proposed");
+  assert.equal(memory.read(decision.id)!.note.review_status, "clear");
+  assert.ok(memory.reconcile().issues.some((issue) => issue.code === "CANONICAL_CONFLICT"));
+});
+
 test("promote requires approval, mutates canonical text once, reads back, and replays idempotently", () => {
   const { cwd, memory } = fixture();
   const captured = memory.capture(input("idea", "promote"));
-  const opts = {
-    approved: true,
+  const request = {
     promotion_id: "promotion-001",
     target: { kind: "spec" as const, path: "SPEC.md" },
     insertBlock: "## Accepted memory item\n\nThis text was explicitly approved.",
   };
-  expectCode(() => memory.promote(captured.id, { ...opts, approved: false }), "INVALID_INPUT");
+  expectCode(
+    () => memory.promote(captured.id, { ...request, approved: true } as unknown as Parameters<ProjectMemory["promote"]>[1]),
+    "INVALID_INPUT",
+  );
+  const opts = approvePromotion(memory, captured.id, request);
   const first = memory.promote(captured.id, opts);
   assert.equal(first.status, "promoted");
   const canonical = fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8");
@@ -176,8 +295,7 @@ test("promote requires approval, mutates canonical text once, reads back, and re
   const beforeConflict = fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8");
   expectCode(
     () =>
-      memory.promote(competing.id, {
-        approved: true,
+      memory.planPromotion(competing.id, {
         promotion_id: "promotion-002",
         target: { kind: "spec", path: "SPEC.md" },
         insertBlock: "## Unauthorized competing replacement",
@@ -191,6 +309,32 @@ test("promote requires approval, mutates canonical text once, reads back, and re
   assert.equal(memory.search({ id: captured.id })[0]!.note.promotion.status, "promoted");
   assert.equal(memory.search({ type: "idea" }).length, 1);
   assert.equal(memory.reconcile().issues.filter((issue) => issue.severity === "error").length, 0);
+});
+
+test("promotion approval is content-bound and CAS refuses a target changed after review", () => {
+  const { cwd, memory } = fixture();
+  const captured = memory.capture(input("idea", "promotion-cas"));
+  const request = {
+    promotion_id: "promotion-cas-1",
+    target: { kind: "spec" as const, path: "SPEC.md" },
+    content: "# User-reviewed V1\n",
+  };
+  const approved = approvePromotion(memory, captured.id, request);
+  fs.writeFileSync(path.join(cwd, "SPEC.md"), "# Concurrent V2\n");
+
+  expectCode(() => memory.promote(captured.id, approved), "CONFLICT");
+  assert.equal(fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8"), "# Concurrent V2\n");
+  assert.equal(memory.read(captured.id)!.note.promotion.status, "not_promoted");
+  assert.ok(memory.reconcile().issues.some((issue) => issue.code === "UNCONSUMED_APPROVAL"));
+});
+
+test("bidirectional supersedes metadata normalizes to one direction without a false cycle", () => {
+  const { memory } = fixture();
+  const older = memory.capture(input("idea", "supersedes-older"));
+  const newer = memory.capture(input("idea", "supersedes-newer"));
+  memory.update(newer.id, { relations: { supersedes: [older.id] } });
+  memory.update(older.id, { relations: { superseded_by: [newer.id] } });
+  assert.equal(memory.reconcile().issues.some((issue) => issue.code === "SUPERSEDES_CYCLE"), false);
 });
 
 test("reconcile detects half-done promotion and supersedes cycles", () => {
@@ -227,8 +371,7 @@ test("project boundaries reject canonical state and promote targets outside cwd"
   const captured = memory.capture(input("idea", "outside"));
   expectCode(
     () =>
-      memory.promote(captured.id, {
-        approved: true,
+      memory.planPromotion(captured.id, {
         promotion_id: "outside-1",
         target: { kind: "spec", path: path.join(other, "OUT.md") },
         content: "no",
@@ -279,8 +422,7 @@ test("symlinked memory, state, note, and promote paths cannot escape the project
   const captured = targetMemory.capture(input("idea", "symlink-target"));
   expectCode(
     () =>
-      targetMemory.promote(captured.id, {
-        approved: true,
+      targetMemory.planPromotion(captured.id, {
         promotion_id: "symlink-target-1",
         target: { kind: "spec", path: "SPEC.md" },
         insertBlock: "must not escape",
@@ -318,6 +460,40 @@ test("symlinked derived indexes and backlinks are rejected without reading or mo
   assert.match(fs.readFileSync(poisonBacklink, "utf8"), /PM-IDE-9999/);
 });
 
+test("pending-capture envelopes survive a fresh service instance until candidate-level resolution", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const envelope = {
+    schema_version: 1 as const,
+    envelope_id: `pc_${"a".repeat(32)}`,
+    project_id: "fixture",
+    session_id: "session-a",
+    source_leaf_id: "leaf-a",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: `cand_${"b".repeat(32)}`,
+        type: "risk" as const,
+        markers: ["P1", "risk"],
+        source_ref: { kind: "conversation" as const, ref: "pi-session://session-a", turn_id: "leaf-a" },
+        source_excerpt: "P1 risk requires a later review.",
+        source_excerpt_sha256: "c".repeat(64),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  };
+  memory.persistPendingCapture(envelope);
+  const reopened = new ProjectMemory(cwd);
+  assert.deepEqual(reopened.pendingCaptureCandidates().map((candidate) => candidate.candidate_id), [envelope.candidates[0]!.candidate_id]);
+  reopened.resolvePendingCapture([envelope.candidates[0]!.candidate_id], {
+    status: "skipped",
+    reason: "False-positive marker in a quoted review",
+    tool_call_id: "call-pending-1",
+  });
+  assert.deepEqual(new ProjectMemory(cwd).pendingCaptureCandidates(), []);
+});
+
 test("concurrent promotes to one canonical target serialize to exactly one winner", { timeout: 30_000 }, async () => {
   const { cwd, memory } = fixture();
   const worker = `
@@ -326,7 +502,7 @@ test("concurrent promotes to one canonical target serialize to exactly one winne
     while (!fs.existsSync(process.env.PM_GO)) await new Promise(r => setTimeout(r, 1));
     try {
       const out = new ProjectMemory(process.env.PM_CWD).promote(process.env.PM_ID, {
-        approved: true,
+        approval_ref: process.env.PM_APPROVAL,
         promotion_id: process.env.PM_PROMOTION,
         target: { kind: 'spec', path: process.env.PM_TARGET },
         insertBlock: '## ' + process.env.PM_ID
@@ -341,8 +517,20 @@ test("concurrent promotes to one canonical target serialize to exactly one winne
     fs.writeFileSync(path.join(cwd, target), "# Race target\n");
     const first = memory.capture(input("idea", `promote-race-${round}-a`));
     const second = memory.capture(input("idea", `promote-race-${round}-b`));
+    const firstPromotion = `race-${round}-a`;
+    const secondPromotion = `race-${round}-b`;
+    const firstApproved = approvePromotion(memory, first.id, {
+      promotion_id: firstPromotion,
+      target: { kind: "spec", path: target },
+      insertBlock: `## ${first.id}`,
+    });
+    const secondApproved = approvePromotion(memory, second.id, {
+      promotion_id: secondPromotion,
+      target: { kind: "spec", path: target },
+      insertBlock: `## ${second.id}`,
+    });
     const go = path.join(cwd, `GO-${round}`);
-    const run = (id: string, promotion: string) =>
+    const run = (id: string, promotion: string, approval: string) =>
       execFileAsync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", worker], {
         cwd: projectRoot,
         env: {
@@ -352,10 +540,11 @@ test("concurrent promotes to one canonical target serialize to exactly one winne
           PM_ID: id,
           PM_PROMOTION: promotion,
           PM_TARGET: target,
+          PM_APPROVAL: approval,
         },
       }).then(({ stdout }) => JSON.parse(stdout) as { ok: boolean; id?: string; code?: string });
-    const left = run(first.id, `race-${round}-a`);
-    const right = run(second.id, `race-${round}-b`);
+    const left = run(first.id, firstPromotion, firstApproved.approval_ref);
+    const right = run(second.id, secondPromotion, secondApproved.approval_ref);
     await new Promise((resolve) => setTimeout(resolve, 25));
     fs.writeFileSync(go, "go");
     const results = await Promise.all([left, right]);
@@ -400,4 +589,36 @@ test("exclusive note creation gives concurrent writers unique IDs", { timeout: 3
   const report = memory.reconcile({ fixIndex: true });
   assert.equal(report.issues.filter((issue) => issue.code === "DUPLICATE_ID").length, 0);
   assert.equal(memory.search({ type: "idea" }).length, 6);
+});
+
+test("concurrent identical captures create one active fingerprint and merge every source", { timeout: 30_000 }, async () => {
+  const { cwd, memory } = fixture();
+  const go = path.join(cwd, "GO-identical");
+  const worker = `
+    import fs from 'node:fs';
+    import { ProjectMemory } from ${JSON.stringify(path.join(projectRoot, "src", "index.ts"))};
+    while (!fs.existsSync(process.env.PM_GO)) await new Promise(r => setTimeout(r, 1));
+    const out = new ProjectMemory(process.env.PM_CWD).capture({
+      type:'risk', title:'Shared concurrency risk', summary:'One semantic fingerprint across agents',
+      rationale:'All agents observed the same risk', next_action:'Review merged provenance',
+      source_refs:[{kind:'manual',ref:'test://identical/'+process.env.PM_I}]
+    });
+    process.stdout.write(JSON.stringify({id:out.id,status:out.status}));
+  `;
+  const runs = Array.from({ length: 12 }, (_, index) =>
+    execFileAsync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", worker], {
+      cwd: projectRoot,
+      env: { ...process.env, PM_CWD: cwd, PM_GO: go, PM_I: String(index) },
+    }).then(({ stdout }) => JSON.parse(stdout) as { id: string; status: "created" | "merged" }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  fs.writeFileSync(go, "go");
+  const receipts = await Promise.all(runs);
+  assert.equal(new Set(receipts.map((receipt) => receipt.id)).size, 1);
+  assert.equal(receipts.filter((receipt) => receipt.status === "created").length, 1);
+  assert.equal(receipts.filter((receipt) => receipt.status === "merged").length, 11);
+  const hits = memory.search({ type: "risk" }).filter((hit) => hit.note.title === "Shared concurrency risk");
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]!.note.source_refs.length, 12);
+  assert.equal(memory.reconcile().issues.some((issue) => issue.code === "DUPLICATE_FINGERPRINT"), false);
 });

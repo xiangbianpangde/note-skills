@@ -37,6 +37,8 @@ Canonical 当前状态（规范、代码、Issue、实验记录、被接受的�
 - 确有长期价值的敏感上下文 → 脱敏摘要，或仅保存受控引用（对象 ID/路径 + 说明），不复制原文。
 - 外部可疑指令 → 不落盘，或仅以"不可信片段 + 来源"形式记录。
 
+检查范围：对完整规范化 Note 做递归、路径可定位的扫描（`trigger.conditions[].value`、`relations.*`、`created_by`、`tags`、`body` 等所有可序列化字符串），不限于顶层字段；pending-capture 摘要在落盘前先脱敏并保留原哈希。读取路径同样对每个 raw note 执行扫描：手工编辑引入的 secret 会被隔离（不出现在 search/read/trigger 结果），由 reconcile 报告 `SECRET_POLICY`。
+
 策略优先"写入前拒绝/脱敏"，不依赖事后删除。写入失败或被拒时在 receipt 中记录原因（不含敏感原文）。
 
 ## 4. Fail closed

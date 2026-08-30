@@ -16,6 +16,8 @@
     "summary",
     "rationale",
     "authority",
+    "review_status",
+    "review_reason",
     "source_refs",
     "relations",
     "trigger",
@@ -43,9 +45,11 @@
       "const": "memory",
       "description": "Notes stored in .project-memory always carry authority 'memory' (§7.2); canonical/source truth lives only in canonical sources."
     },
+    "review_status": { "enum": ["clear", "needs_review"] },
+    "review_reason": { "type": ["string", "null"] },
     "confidence": { "enum": ["explicit_discussion", "inferred", "unverified"] },
     "sensitivity": { "enum": ["internal", "public", "restricted"] },
-    "tags": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "tags":  { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "source_refs": {
       "type": "array",
       "minItems": 1,

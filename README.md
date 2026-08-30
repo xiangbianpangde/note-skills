@@ -44,4 +44,4 @@ Then initialize an opted-in project with the `project_memory` tool action `init`
 
 ## MVP capability boundary
 
-Version 0.1.0 uses exact metadata filters and lexical search. Trigger evaluation is lazy at task/session boundaries. It does not include embeddings, a graph database, a daemon, automatic scientific adjudication, or cross-project federation.
+Version 0.2.0 uses exact metadata filters, prompt-term relevance ranking, and trusted canonical-state triggers. It does not include embeddings, a graph database, a daemon, automatic scientific adjudication, or cross-project federation. Promote requires a content-bound single-use UI approval; pending capture candidates persist durably under `.project-memory/pending/`.

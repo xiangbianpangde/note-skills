@@ -124,6 +124,11 @@ export type Sensitivity = 'internal' | 'public' | 'restricted'
 
 export const SENSITIVITIES: readonly Sensitivity[] = ['internal', 'public', 'restricted']
 
+/** Cross-cutting review state; kept separate from each note type's lifecycle status. */
+export type ReviewStatus = 'clear' | 'needs_review'
+
+export const REVIEW_STATUSES: readonly ReviewStatus[] = ['clear', 'needs_review']
+
 export type SourceRefKind =
   | 'conversation'
   | 'event'
@@ -293,6 +298,9 @@ export interface Note {
   authority: NoteAuthority
   confidence?: Confidence
   sensitivity?: Sensitivity
+  /** Review is orthogonal to the type-specific lifecycle status. */
+  review_status: ReviewStatus
+  review_reason: string | null
   tags: string[]
   source_refs: SourceRef[]
   related_files: RelatedFile[]
@@ -330,9 +338,21 @@ export interface ScannedNote {
  * statuses default to the actual note statuses in the store; callers may
  * override with a snapshot for test/replay purposes.
  */
+export interface CanonicalConflictEvidence {
+  /** Stable canonical object/path that conflicts with the historical note. */
+  canonical_ref: string
+  /** Human- or adapter-supplied explanation; never inferred from the note itself. */
+  reason: string
+  observed_at?: string
+  /** Optional hash of the note revision inspected by the trusted adapter. */
+  note_sha256?: string
+}
+
 export interface TriggerState {
   milestones: Record<string, string>
   noteStatuses?: Record<string, string>
+  /** Trusted canonical-state adapter output, keyed by stable Note ID. */
+  canonical_conflicts?: Record<string, CanonicalConflictEvidence>
 }
 
 export type ConditionTruth = 'satisfied' | 'unsatisfied' | 'unknown'

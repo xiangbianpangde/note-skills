@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 - 2026-08-30
+
+- Promote now requires a content-bound single-use approval: the extension displays the exact target bytes and hashes in a Pi UI confirmation before minting an `approval_ref`; the model cannot self-approve.
+- Capture Gate candidates are persisted durably under `.project-memory/pending/`; each candidate must be resolved by capture or acknowledge with `candidate_ids`.
+- Retrieval is prompt-relevant: task-start retrieval ranks notes by the actual user prompt terms.
+- Canonical conflict evidence in the canonical state file marks hits `needs_review` via a separate `review_status`; lifecycle statuses are untouched.
+- Secret policy scans the full normalized note (trigger, relations, created_by, …), and manually edited notes are quarantined on read.
+
 ## 0.1.1 - 2026-08-29
 
 - Require deterministic Capture/Promote receipts to bind the real `tool_call_id`; model narration alone is unverified.
