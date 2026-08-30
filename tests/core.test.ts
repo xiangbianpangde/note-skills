@@ -1082,3 +1082,129 @@ test("writeFileAtomicBatch commits all-or-nothing: staging failure leaves target
     [],
   );
 });
+
+test("numeric objectId/version are rejected before any canonical write or approval", () => {
+  const { cwd, memory } = fixture();
+  const captured = memory.capture(input("idea", "target-meta"));
+  // planPromotion must reject the malformed target up front.
+  expectCode(
+    () =>
+      memory.planPromotion(captured.id, {
+        promotion_id: "target-meta-1",
+        target: { kind: "spec", path: "SPEC.md", objectId: 42 as never },
+        insertBlock: "## Bad meta\n",
+      }),
+    "INVALID_INPUT",
+  );
+  expectCode(
+    () =>
+      memory.planPromotion(captured.id, {
+        promotion_id: "target-meta-2",
+        target: { kind: "spec", path: "SPEC.md", version: 7 as never },
+        insertBlock: "## Bad meta\n",
+      }),
+    "INVALID_INPUT",
+  );
+  // A hand-written approval record with numeric version is INCONSISTENT.
+  const validPlan = memory.planPromotion(captured.id, {
+    promotion_id: "target-meta-3",
+    target: { kind: "spec", path: "SPEC.md", objectId: "obj-1", version: "v1" },
+    insertBlock: "## Good meta\n",
+  });
+  const validApproval = memory.recordPromotionApproval(validPlan, {
+    kind: "human",
+    id: "pi-session://target-meta",
+    channel: "pi-ui",
+  });
+  const approvalFile = path.join(cwd, ".project-memory", "approvals", `${validApproval.approval_ref}.json`);
+  const tampered = JSON.parse(fs.readFileSync(approvalFile, "utf8")) as {
+    target: { version: unknown };
+  };
+  tampered.target.version = 7;
+  fs.writeFileSync(approvalFile, JSON.stringify(tampered, null, 2) + "\n");
+  expectCode(
+    () =>
+      memory.promote(captured.id, {
+        approval_ref: validApproval.approval_ref,
+        promotion_id: "target-meta-3",
+        target: { kind: "spec", path: "SPEC.md", objectId: "obj-1", version: "v1" },
+        insertBlock: "## Good meta\n",
+      }),
+    "INCONSISTENT",
+  );
+  assert.equal(fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8"), "# Canonical Spec\n");
+  // Replaying false: objectId/version are bound — different objectId is CONFLICT.
+  const secondPlan = memory.planPromotion(captured.id, {
+    promotion_id: "target-meta-4",
+    target: { kind: "spec", path: "SPEC.md", objectId: "obj-2", version: "v1" },
+    insertBlock: "## Good meta\n",
+  });
+  const secondApproval = memory.recordPromotionApproval(secondPlan, {
+    kind: "human",
+    id: "pi-session://target-meta-2",
+    channel: "pi-ui",
+  });
+  expectCode(
+    () =>
+      memory.promote(captured.id, {
+        approval_ref: secondApproval.approval_ref,
+        promotion_id: "target-meta-4",
+        target: { kind: "spec", path: "SPEC.md", objectId: "obj-1", version: "v1" },
+        insertBlock: "## Good meta\n",
+      }),
+    "CONFLICT",
+  );
+});
+
+test("capability holds a deep copy of the target: mutating plan.target afterwards is refused", () => {
+  const { cwd, memory } = fixture();
+  const captured = memory.capture(input("idea", "target-copy"));
+  const plan = memory.planPromotion(captured.id, {
+    promotion_id: "target-copy-1",
+    target: { kind: "spec", path: "SPEC.md", objectId: "obj-orig", version: "v1" },
+    insertBlock: "## Copy test\n",
+  });
+  const approval = memory.recordPromotionApproval(plan, {
+    kind: "human",
+    id: "pi-session://target-copy",
+    channel: "pi-ui",
+  });
+  // Mutate the plan object AFTER approval — capability holds a deep copy, so
+  // the in-memory plan no longer matters; only the approval record does.
+  plan.target.ref = "MUTATED";
+  plan.target.objectId = "obj-mutated";
+  // Promote with the ORIGINAL target bytes still succeeds (approval + capability
+  // hold the originals); the note metadata records the approved objectId.
+  const receipt = memory.promote(captured.id, {
+    approval_ref: approval.approval_ref,
+    promotion_id: "target-copy-1",
+    target: { kind: "spec", path: "SPEC.md", objectId: "obj-orig", version: "v1" },
+    insertBlock: "## Copy test\n",
+  });
+  assert.equal(receipt.status, "promoted");
+  assert.equal(memory.read(captured.id)!.note.promotion.target?.objectId, "obj-orig");
+  // But requesting DIFFERENT target metadata than approved is CONFLICT (new
+  // note, separate canonical file so the backlink guard stays out of the way).
+  fs.writeFileSync(path.join(cwd, "OTHER.md"), "# Other canonical\n");
+  const other = memory.capture(input("idea", "target-copy-2"));
+  const otherPlan = memory.planPromotion(other.id, {
+    promotion_id: "target-copy-2",
+    target: { kind: "spec", path: "OTHER.md", objectId: "obj-orig", version: "v1" },
+    insertBlock: "## Copy test\n",
+  });
+  const otherApproval = memory.recordPromotionApproval(otherPlan, {
+    kind: "human",
+    id: "pi-session://target-copy-2",
+    channel: "pi-ui",
+  });
+  expectCode(
+    () =>
+      memory.promote(other.id, {
+        approval_ref: otherApproval.approval_ref,
+        promotion_id: "target-copy-2",
+        target: { kind: "spec", path: "OTHER.md", objectId: "obj-DIFFERENT", version: "v1" },
+        insertBlock: "## Copy test\n",
+      }),
+    "CONFLICT",
+  );
+});

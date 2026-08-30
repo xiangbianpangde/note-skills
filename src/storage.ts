@@ -415,8 +415,11 @@ export function writeFileAtomic(file: string, content: string): void {
  * Phase 2 (commit): temps are renamed into place in order. If a rename fails
  * mid-way, files already renamed are restored to their captured original
  * content (atomic write), the remaining temps are removed, and the original
- * error is rethrown — restoring the store to its pre-commit state unless the
- * restore itself fails (disk-level fault, unrecoverable).
+ * error is rethrown. The restore is BEST-EFFORT, not crash-atomic: if the
+ * restore write itself fails (disk-level fault), the restore error is
+ * suppressed in favor of the original error and the store may be left
+ * partially updated. Callers must therefore re-run reconcile for derived
+ * registries after a thrown commit failure.
  */
 export function writeFileAtomicBatch(files: Array<{ file: string; content: string }>): void {
   if (files.length === 0) return

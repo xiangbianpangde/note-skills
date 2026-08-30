@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4 - 2026-08-30
+
+- `objectId/version` (and target ref) are validated as strings and bound into approval + capability comparison; non-string values are rejected before any canonical write.
+- The live capability stores a deep copy of the approved target, so later mutation of the plan object cannot change what gets promoted.
+
 ## 0.2.3 - 2026-08-30
 
 - Promotion approval is bound to the exact approved content in-process and re-verified against the on-disk record and the live request before every canonical write; editing the approval after confirmation is refused.

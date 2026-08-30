@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4 - 2026-08-30
+
+- P2: `CanonicalTarget.objectId/version` are now validated as optional strings at every boundary — target resolution (`resolvePromotionTarget`), promotion plan validation, approval-record validation (`INCONSISTENT` for malformed disk records) — BEFORE any canonical write or approval record is created. Numeric values no longer reach the note write, so a malformed target cannot produce an unreadable note after a successful-looking write.
+- P2: `objectId/version` (and `target.ref`) are now part of `assertApprovalBinding()` and `assertLiveCapabilityMatchesApproval()`, so approval binding and capability comparison cover the FULL target identity.
+- P2: the live capability now holds a deep copy (`structuredClone`) of the approved target; mutating `plan.target` (or its nested fields) after minting no longer changes the approved bytes used at promote time.
+- Tests: 41 -> 43 (numeric objectId/version at plan+approval boundaries, deep-copy immutability + full-target binding).
+
 ## 0.2.3 - 2026-08-30
 
 - P1: the live approval capability now captures the EXACT approved content (project_id, note/promotion IDs, full target kind/ref/path, mode, before/after/payload hashes, planned_at, approved_at, approving principal). `promote()` verifies the capability against both the on-disk approval record (read again under lock) and the incoming request before any canonical write; editing the approval record after minting (approve-A-then-write-B) is refused, closing the approve/replay TOCTOU hole.

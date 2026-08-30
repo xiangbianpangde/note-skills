@@ -42,6 +42,7 @@ import {
   emptyRelations,
   defaultPromotionInfo,
   ProjectMemoryError,
+  type ErrorCode,
 } from './model.ts'
 import type {
   NoteType,
@@ -1471,7 +1472,9 @@ export class ProjectMemory {
       project_id: cfg.project_id,
       note_id: plan.note_id,
       promotion_id: plan.promotion_id,
-      target: plan.target,
+      // Deep-copy the target: the caller can mutate plan.target afterwards and
+      // the capability must still hold the EXACT object that was approved.
+      target: structuredClone(plan.target),
       mode: plan.mode,
       payload_sha256: plan.payload_sha256,
       before_sha256: plan.before_sha256,
@@ -2217,6 +2220,23 @@ function isUnsafeProjectRelativePath(relPath: string): boolean {
   return false
 }
 
+/**
+ * CanonicalTarget.objectId/version are optional strings. Reject non-string
+ * values (e.g. numbers) at every boundary BEFORE any canonical write or
+ * approval record is created, so a malformed target can never produce a
+ * half-written promote or an unreadable note afterwards.
+ */
+function assertTargetMetaStrings(
+  target: { objectId?: unknown; version?: unknown },
+  label: string,
+  code: ErrorCode = 'INVALID_INPUT',
+): void {
+  if (target.objectId !== undefined && typeof target.objectId !== 'string')
+    throw new ProjectMemoryError(code, `${label}.objectId must be a string when present, got ${typeof target.objectId}`)
+  if (target.version !== undefined && typeof target.version !== 'string')
+    throw new ProjectMemoryError(code, `${label}.version must be a string when present, got ${typeof target.version}`)
+}
+
 /** Coerce a raw parsed frontmatter object into a typed Note (best effort). */
 function hydrateNote(raw: ScannedRaw): ScannedNote | null {
   const o = raw.noteObj as Partial<Note>
@@ -2302,6 +2322,7 @@ function resolvePromotionTarget(cwd: string, request: PromotionRequest): Resolve
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion payload must be a string')
   if (IN_FILE_MARKER_RE.test(payload))
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion payload must not forge a Project Memory backlink')
+  assertTargetMetaStrings(requested, 'target')
   const target: CanonicalTarget = {
     kind: (requested.kind ?? 'file') as CanonicalTargetKind,
     ref: requested.ref ?? rel,
@@ -2364,6 +2385,7 @@ function validatePromotionPlan(plan: PromotionPlan, cwd: string, projectId: stri
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan target kind/ref must be non-empty strings')
   if (typeof plan.target.path !== 'string' || isUnsafeProjectRelativePath(plan.target.path))
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan target path must be project-relative and safe')
+  assertTargetMetaStrings(plan.target, 'promotion plan target')
   const rel = assertProjectRelativePath(cwd, plan.target.path, 'promotion target')
   const abs = path.join(cwd, rel)
   rejectSymlinkComponents(cwd, abs, 'promotion target', 'INCONSISTENT')
@@ -2409,6 +2431,7 @@ function validateApprovalRecord(record: PromotionApprovalRecord, projectId: stri
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has an unsafe target path`)
   if (typeof record.target.kind !== 'string' || record.target.kind.trim() === '' || typeof record.target.ref !== 'string' || record.target.ref.trim() === '')
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has incomplete target kind/ref`)
+  assertTargetMetaStrings(record.target, `approval ${record.approval_ref} target`, 'INCONSISTENT')
   if (!['replace_file', 'append_block'].includes(record.mode))
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has invalid mode`)
   for (const hash of [record.payload_sha256, record.before_sha256, record.after_sha256])
@@ -2498,8 +2521,13 @@ function assertLiveCapabilityMatchesApproval(
   if (capability.project_id !== projectId) mismatches.push('cap.project_id')
   if (capability.note_id !== noteId) mismatches.push('cap.note_id')
   if (capability.promotion_id !== request.promotion_id) mismatches.push('cap.promotion_id')
-  if (capability.target.kind !== prepared.target.kind || capability.target.ref !== prepared.target.ref || capability.target.path !== prepared.rel)
-    mismatches.push('cap.target')
+  if (
+    capability.target.kind !== prepared.target.kind ||
+    capability.target.ref !== prepared.target.ref ||
+    capability.target.path !== prepared.rel ||
+    (capability.target.objectId ?? null) !== (prepared.target.objectId ?? null) ||
+    (capability.target.version ?? null) !== (prepared.target.version ?? null)
+  ) mismatches.push('cap.target')
   if (capability.mode !== prepared.mode) mismatches.push('cap.mode')
   if (capability.payload_sha256 !== sha256hex(prepared.payload)) mismatches.push('cap.payload_sha256')
   if (capability.before_sha256 !== approval.before_sha256) mismatches.push('cap.before_sha256')
@@ -2507,6 +2535,9 @@ function assertLiveCapabilityMatchesApproval(
   if (capability.payload_sha256 !== approval.payload_sha256) mismatches.push('cap.payload_sha256_vs_approval')
   if (capability.target.path !== approval.target.path) mismatches.push('cap.target_vs_approval')
   if (capability.target.kind !== approval.target.kind) mismatches.push('cap.target_kind_vs_approval')
+  if (capability.target.ref !== approval.target.ref) mismatches.push('cap.target_ref_vs_approval')
+  if ((capability.target.objectId ?? null) !== (approval.target.objectId ?? null)) mismatches.push('cap.target_objectId_vs_approval')
+  if ((capability.target.version ?? null) !== (approval.target.version ?? null)) mismatches.push('cap.target_version_vs_approval')
   if (capability.mode !== approval.mode) mismatches.push('cap.mode_vs_approval')
   if (capability.note_id !== approval.note_id) mismatches.push('cap.note_vs_approval')
   if (capability.promotion_id !== approval.promotion_id) mismatches.push('cap.promotion_vs_approval')
@@ -2558,6 +2589,9 @@ function assertApprovalBinding(
   if (approval.promotion_id !== request.promotion_id) mismatches.push('promotion_id')
   if (approval.target.path !== prepared.rel) mismatches.push('target.path')
   if (approval.target.kind !== prepared.target.kind) mismatches.push('target.kind')
+  if (approval.target.ref !== prepared.target.ref) mismatches.push('target.ref')
+  if ((approval.target.objectId ?? null) !== (prepared.target.objectId ?? null)) mismatches.push('target.objectId')
+  if ((approval.target.version ?? null) !== (prepared.target.version ?? null)) mismatches.push('target.version')
   if (approval.mode !== prepared.mode) mismatches.push('mode')
   if (approval.payload_sha256 !== sha256hex(prepared.payload)) mismatches.push('payload_sha256')
   if (mismatches.length)
