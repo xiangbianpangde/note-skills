@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-08-30
+
+- Promote approval is pinned to the live Pi UI channel (`pi-session://` principal); ad-hoc approval minting is rejected.
+- Pending candidates must be fully resolvable before capture writes a note; resolution of a mixed candidate set is atomic.
+- Retrieval only applies canonical-conflict `needs_review` when the evidence matches the current note revision.
+
 ## 0.2.0 - 2026-08-30
 
 - Promote now requires a content-bound single-use approval: the extension displays the exact target bytes and hashes in a Pi UI confirmation before minting an `approval_ref`; the model cannot self-approve.

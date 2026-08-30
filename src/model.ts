@@ -377,6 +377,8 @@ export interface TriggerResult {
   /** Present when state is 'unresolved': what could not be decided (§11.8). */
   reason?: string
   conditions: ConditionEval[]
+  /** Current note revision hash; lets canonical-conflict evidence be checked for staleness. */
+  note_sha256?: string
 }
 
 export interface TriggerEvaluation {

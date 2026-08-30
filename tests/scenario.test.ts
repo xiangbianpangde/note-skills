@@ -87,7 +87,7 @@ const request = {
   insertBlock:'## Multi-agent scheduling\\n\\nReview after P0; source Project Memory '+process.env.PM_ID+'.'
 };
 const plan = pm.planPromotion(process.env.PM_ID, request);
-const approval = pm.recordPromotionApproval(plan, {kind:'human',id:'scenario-user',channel:'test'});
+const approval = pm.recordPromotionApproval(plan, {kind:'human',id:'pi-session://scenario-user',channel:'pi-ui'});
 const promoted = pm.promote(process.env.PM_ID, {...request, approval_ref:approval.approval_ref});
 process.stdout.write(JSON.stringify({due:due.map(x=>x.id),promotion:promoted.status}));
 `,

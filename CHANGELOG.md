@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 - 2026-08-30
+
+- Promotion metadata hardening: persisted `promotion.target.path` is statically checked (non-absolute, no `..` escape, never inside `.project-memory`) before any write, and dynamically re-validated (project-relative, symlink-safe, existing) by `scan()` and `reconcile()` before backlink reads.
+- Runtime validation aligned with the JSON Schema for `created_by`, `source_refs` optional fields, promotion target structure, and nullable reason fields.
+- Stale canonical-conflict evidence is no longer applied at retrieval: `search()` and the extension only promote `needs_review` when `note_sha256` matches the current revision.
+- `resolvePendingCapture()` is now two-phase atomic: the entire candidate set is validated before any envelope is written, so a mixed valid/invalid request cannot half-succeed.
+- `recordPromotionApproval()` pins the approval channel to `pi-ui` and requires a `pi-session://` principal id; ad-hoc Core callers cannot mint approvals outside the live Pi UI path.
+- Extension capture pre-validates `candidate_ids` before writing the note, so an unresolvable candidate set fails before capture.
+- Skill metadata version bumped to 0.2.1.
+
 ## 0.2.0 - 2026-08-30
 
 - Trusted scan: `scan()` now validates every note's schema, project_id, and authority before returning it; invalid, foreign-project, and secret-bearing notes are quarantined.

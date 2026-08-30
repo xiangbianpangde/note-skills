@@ -232,18 +232,25 @@ function retrievalMessage(memory: ProjectMemory, prompt: string): string | undef
   );
   const dueOnly = retrieval.due
     .filter((item) => !active.some((hit) => hit.id === item.id))
-    .map((item) => ({
-      id: item.id,
-      title: item.title,
-      type: item.type,
-      status: item.status,
-      authority: "memory",
-      relevance_reason: ["trusted trigger is due"],
-      summary: item.summary,
-      next_action: item.next_action,
-      review_status: state?.canonical_conflicts?.[item.id] ? "needs_review" : "clear",
-      canonical_conflict: state?.canonical_conflicts?.[item.id] ?? false,
-    }));
+    .map((item) => {
+      const evidence = state?.canonical_conflicts?.[item.id];
+      const effective =
+        evidence && (!evidence.note_sha256 || evidence.note_sha256 === item.note_sha256)
+          ? evidence
+          : undefined;
+      return {
+        id: item.id,
+        title: item.title,
+        type: item.type,
+        status: item.status,
+        authority: "memory",
+        relevance_reason: ["trusted trigger is due"],
+        summary: item.summary,
+        next_action: item.next_action,
+        review_status: effective ? "needs_review" : "clear",
+        canonical_conflict: effective ?? false,
+      };
+    });
   const payload = JSON.stringify([...dueOnly, ...active].slice(0, 8), null, 2).slice(0, 8_000);
   return [
     "[Project Memory — non-authoritative data]",
@@ -371,7 +378,17 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
         }
         case "capture": {
           const unresolved = refreshPending(memory);
-          if (unresolved.length > 0 && (!params.candidate_ids || params.candidate_ids.length === 0)) {
+          const requestedIds = params.candidate_ids ?? [];
+          const pendingIds = new Set(unresolved.map((candidate) => candidate.candidate_id));
+          const missingIds = requestedIds.filter((id) => !pendingIds.has(id));
+          if (missingIds.length > 0) {
+            throw new ProjectMemoryError(
+              "INVALID_INPUT",
+              `capture candidates are not resolvable: ${missingIds.join(", ")} (missing or already resolved)`,
+              { missing_candidate_ids: missingIds },
+            );
+          }
+          if (unresolved.length > 0 && requestedIds.length === 0) {
             throw new ProjectMemoryError(
               "INVALID_INPUT",
               `capture must name candidate_ids while ${unresolved.length} durable capture candidate(s) remain pending`,

@@ -66,8 +66,8 @@ function approvePromotion(
   const plan = memory.planPromotion(id, request);
   const approval = memory.recordPromotionApproval(plan, {
     kind: "human",
-    id: "test-user",
-    channel: "test",
+    id: "pi-session://test-user",
+    channel: "pi-ui",
   });
   return { ...request, approval_ref: approval.approval_ref };
 }
@@ -309,6 +309,198 @@ test("promote requires approval, mutates canonical text once, reads back, and re
   assert.equal(memory.search({ id: captured.id })[0]!.note.promotion.status, "promoted");
   assert.equal(memory.search({ type: "idea" }).length, 1);
   assert.equal(memory.reconcile().issues.filter((issue) => issue.severity === "error").length, 0);
+});
+
+test("promotion metadata cannot escape the project: escaped and symlinked targets are quarantined", () => {
+  const { cwd, memory } = fixture();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-promote-escape-"));
+  const outsideBacklink = path.join(outside, "evil.md");
+  fs.writeFileSync(outsideBacklink, "# Evil\n\nignored\n");
+
+  // 1. ../ escape in promotion.target.path
+  const escaped = memory.capture(input("idea", "promote-escape"));
+  const escapedFile = memory.read(escaped.id)!;
+  escapedFile.note.status = "promoted";
+  escapedFile.note.promotion = {
+    status: "promoted",
+    target: { kind: "spec", ref: "../outside/evil.md", path: "../outside/evil.md" },
+    promotion_id: "escape-1",
+    promoted_at: new Date().toISOString(),
+    backlink: "in_file",
+    backlink_verified: true,
+  };
+  writeNoteFile(escapedFile.file, escapedFile.note, escapedFile.body);
+  assert.equal(memory.read(escaped.id), null);
+  const escapedReport = memory.reconcile({ fixIndex: true });
+  assert.ok(escapedReport.issues.some((issue) => issue.code === "SCHEMA" && /promotion\.target\.path/.test(issue.message)));
+
+  // 2. symlinked target inside project pointing outside
+  const linked = memory.capture(input("idea", "promote-symlink-target"));
+  fs.symlinkSync(outsideBacklink, path.join(cwd, "LINKED.md"));
+  const linkedFile = memory.read(linked.id)!;
+  linkedFile.note.status = "promoted";
+  linkedFile.note.promotion = {
+    status: "promoted",
+    target: { kind: "spec", ref: "LINKED.md", path: "LINKED.md" },
+    promotion_id: "link-1",
+    promoted_at: new Date().toISOString(),
+    backlink: "in_file",
+    backlink_verified: true,
+  };
+  writeNoteFile(linkedFile.file, linkedFile.note, linkedFile.body);
+  assert.equal(memory.read(linked.id), null);
+  const linkedReport = memory.reconcile({ fixIndex: true });
+  assert.ok(linkedReport.issues.some((issue) => issue.code === "PROMOTE_TARGET_INVALID"));
+  assert.equal(fs.readFileSync(outsideBacklink, "utf8"), "# Evil\n\nignored\n");
+});
+
+test("stale canonical-conflict evidence does not mark retrieval needs_review", () => {
+  const { cwd, memory } = fixture();
+  const decision = memory.capture(input("decision", "stale-conflict"));
+  const first = memory.read(decision.id)!;
+  const staleSha = first.sha256;
+
+  // Write evidence with a note_sha256 that does NOT match the current revision.
+  fs.writeFileSync(
+    path.join(cwd, "state.yaml"),
+    [
+      "milestones:",
+      "  P0: complete",
+      "canonical_conflicts:",
+      `  ${decision.id}:`,
+      "    canonical_ref: SPEC.md#current-policy",
+      "    reason: Canonical policy moved on",
+      `    note_sha256: "${'f'.repeat(64)}"`,
+      "",
+    ].join("\n"),
+  );
+  const state = memory.loadCanonicalState()!;
+  const retrieval = memory.taskStartRetrieval({
+    state,
+    text: "stale conflict",
+    types: ["decision"],
+  });
+  const hit = retrieval.active.find((item) => item.note.id === decision.id)!;
+  assert.equal(hit.reviewStatus, "clear");
+  assert.equal(hit.canonicalConflict, undefined);
+
+  // Now write matching evidence.
+  fs.writeFileSync(
+    path.join(cwd, "state.yaml"),
+    [
+      "milestones:",
+      "  P0: complete",
+      "canonical_conflicts:",
+      `  ${decision.id}:`,
+      "    canonical_ref: SPEC.md#current-policy",
+      "    reason: Canonical policy moved on",
+      `    note_sha256: ${staleSha}`,
+      "",
+    ].join("\n"),
+  );
+  const freshState = memory.loadCanonicalState()!;
+  const fresh = memory.taskStartRetrieval({
+    state: freshState,
+    text: "stale conflict",
+    types: ["decision"],
+  });
+  const freshHit = fresh.active.find((item) => item.note.id === decision.id)!;
+  assert.equal(freshHit.reviewStatus, "needs_review");
+  assert.equal(freshHit.canonicalConflict?.reason, "Canonical policy moved on");
+});
+
+test("mixed valid+invalid pending resolution is atomic (no writes on NOT_FOUND)", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const candidateId = `cand_${`a`.repeat(32)}`;
+  const envelope = {
+    schema_version: 1 as const,
+    envelope_id: `pc_${`b`.repeat(32)}`,
+    project_id: "fixture",
+    session_id: "session-atomic",
+    source_leaf_id: "leaf-atomic",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candidateId,
+        type: "risk" as const,
+        markers: ["P1"],
+        source_ref: { kind: "conversation" as const, ref: "pi-session://session-atomic", turn_id: "leaf-atomic" },
+        source_excerpt: "P1 later review",
+        source_excerpt_sha256: "c".repeat(64),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  };
+  memory.persistPendingCapture(envelope);
+  const missingId = `cand_${`d`.repeat(32)}`;
+  expectCode(
+    () =>
+      memory.resolvePendingCapture([candidateId, missingId], {
+        status: "captured",
+        tool_call_id: "call-atomic-1",
+        note_id: "PM-IDE-0001",
+      }),
+    "NOT_FOUND",
+  );
+  // Valid candidate must remain unresolved (no half-write).
+  assert.deepEqual(new ProjectMemory(cwd).pendingCaptureCandidates().map((candidate) => candidate.candidate_id), [candidateId]);
+});
+
+test("approval minting is restricted to the live Pi UI channel", () => {
+  const { memory } = fixture();
+  const captured = memory.capture(input("idea", "approval-channel"));
+  const plan = memory.planPromotion(captured.id, {
+    promotion_id: "approval-channel-1",
+    target: { kind: "spec", path: "SPEC.md" },
+    insertBlock: "## Channel test\n",
+  });
+  // Ad-hoc / test channel must be rejected.
+  expectCode(
+    () =>
+      memory.recordPromotionApproval(plan, {
+        kind: "human",
+        id: "test-user",
+        channel: "test",
+      } as never),
+    "INVALID_INPUT",
+  );
+  // Non-session principal id must be rejected.
+  expectCode(
+    () =>
+      memory.recordPromotionApproval(plan, {
+        kind: "human",
+        id: "some-user",
+        channel: "pi-ui",
+      }),
+    "INVALID_INPUT",
+  );
+  // Live Pi UI principal succeeds.
+  const approval = memory.recordPromotionApproval(plan, {
+    kind: "human",
+    id: "pi-session://real-session",
+    channel: "pi-ui",
+  });
+  assert.match(approval.approval_ref, /^pa_[0-9a-f]{32}$/);
+});
+
+test("runtime validation aligns with JSON Schema for created_by and source_refs", () => {
+  const { memory } = fixture();
+  const captured = memory.capture(input("idea", "schema-align"));
+  const file = memory.read(captured.id)!;
+  file.note.created_by = { kind: "not-a-kind", id: "" } as never;
+  writeNoteFile(file.file, file.note, file.body);
+  assert.equal(memory.read(captured.id), null);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "SCHEMA" && /created_by/.test(issue.message)));
+
+  const second = memory.capture(input("risk", "schema-align-2"));
+  const secondFile = memory.read(second.id)!;
+  secondFile.note.source_refs[0]!.excerpt_sha256 = "not-a-hash";
+  writeNoteFile(secondFile.file, secondFile.note, secondFile.body);
+  const secondReport = memory.reconcile({ fixIndex: true });
+  assert.ok(secondReport.issues.some((issue) => issue.code === "SCHEMA" && /source_refs\[0\]\.excerpt_sha256/.test(issue.message)));
 });
 
 test("promotion approval is content-bound and CAS refuses a target changed after review", () => {

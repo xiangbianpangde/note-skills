@@ -9,11 +9,13 @@
  * Implemented behavior:
  *   - capture / read / search / update / close (model-facing ops, §15.2)
  *   - exact-fingerprint dedup with source merging (§10.6)
- *   - basic secret scanning with fail-closed rejection (§9.7, §4.11)
+ *   - recursive secret scanning with fail-closed rejection (§9.7, §4.11)
  *   - lazy milestone/dependency trigger evaluation (§11.6–§11.8)
- *   - controlled promote: approved=true, existing canonical target,
- *     promotion_id idempotency, write-then-readback, bidirectional links (§12)
- *   - reconcile: schema/duplicate/cycle/half-done-promote/index-drift checks,
+ *   - content-bound promote: planPromotion → UI approval record → CAS
+ *     triple-locked promote; promotion_id idempotency, write-then-readback,
+ *     bidirectional links (§12)
+ *   - durable pending-capture envelopes with atomic candidate resolution
+ *   - reconcile: schema/duplicate/cycle/promotion-target/index-drift checks,
  *     index auto-repair only (§13)
  */
 
@@ -293,6 +295,12 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
       }
       if (!SOURCE_REF_KINDS.includes(s.kind)) bad(`source_refs[${i}].kind`, `unknown kind ${String(s.kind)}`)
       if (typeof s.ref !== 'string' || s.ref === '') bad(`source_refs[${i}].ref`, 'must be non-empty')
+      if (s.turn_id !== undefined && typeof s.turn_id !== 'string')
+        bad(`source_refs[${i}].turn_id`, 'must be a string when present')
+      if (s.observed_at !== undefined && typeof s.observed_at !== 'string')
+        bad(`source_refs[${i}].observed_at`, 'must be a string when present')
+      if (s.excerpt_sha256 !== undefined && !/^[0-9a-f]{64}$/.test(s.excerpt_sha256))
+        bad(`source_refs[${i}].excerpt_sha256`, 'must be 64 lowercase hex when present')
     })
 
   if (typeof note.fingerprint !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(note.fingerprint))
@@ -376,8 +384,21 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
 
   if (!note.created_at || !isIso(note.created_at)) bad('created_at', 'must be ISO-8601')
   if (!note.updated_at || !isIso(note.updated_at)) bad('updated_at', 'must be ISO-8601')
-  if (!note.created_by || typeof note.created_by.kind !== 'string' || typeof note.created_by.id !== 'string')
-    bad('created_by', 'must be { kind, id }')
+  if (
+    !note.created_by ||
+    typeof note.created_by !== 'object' ||
+    !['agent', 'human', 'tool'].includes(note.created_by.kind) ||
+    typeof note.created_by.id !== 'string' ||
+    note.created_by.id.trim() === ''
+  ) bad('created_by', 'must be { kind: agent|human|tool, id: non-empty string }')
+  for (const [field, value] of [
+    ['status_reason', note.status_reason],
+    ['no_trigger_reason', note.no_trigger_reason],
+    ['acceptance_evidence', note.acceptance_evidence],
+  ] as const) {
+    if (value !== null && typeof value !== 'string')
+      bad(field, 'must be a string or null')
+  }
 
   const pro = note.promotion
   if (!pro || typeof pro !== 'object' || !['not_promoted', 'promoting', 'promoted'].includes(pro.status)) {
@@ -387,7 +408,26 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
     if (pro.promotion_id !== null) bad('promotion.promotion_id', 'must be null while not_promoted')
     if (pro.promoted_at !== null) bad('promotion.promoted_at', 'must be null while not_promoted')
   } else {
-    if (!pro.target) bad('promotion.target', 'required once promoting/promoted')
+    if (!pro.target || typeof pro.target !== 'object')
+      bad('promotion.target', 'required once promoting/promoted')
+    else {
+      const tgt = pro.target
+      if (typeof tgt.path !== 'string' || tgt.path.trim() === '')
+        bad('promotion.target.path', 'must be a non-empty string')
+      else if (isUnsafeProjectRelativePath(tgt.path))
+        bad(
+          'promotion.target.path',
+          `must be a project-relative path that cannot escape .project-memory (got ${JSON.stringify(tgt.path)})`,
+        )
+      if (typeof tgt.kind !== 'string' || tgt.kind.trim() === '')
+        bad('promotion.target.kind', 'must be a non-empty string')
+      if (typeof tgt.ref !== 'string' || tgt.ref.trim() === '')
+        bad('promotion.target.ref', 'must be a non-empty string')
+      for (const [field, value] of [['objectId', tgt.objectId], ['version', tgt.version]] as const) {
+        if (value !== undefined && typeof value !== 'string')
+          bad(`promotion.target.${field}`, 'must be a string when present')
+      }
+    }
     if (typeof pro.promotion_id !== 'string' || pro.promotion_id === '')
       bad('promotion.promotion_id', 'required once promoting/promoted (invariant 7)')
     if (pro.status === 'promoted') {
@@ -564,7 +604,7 @@ export interface PromotionApprovalRecord {
   after_sha256: string
   planned_at: string
   approved_at: string
-  approved_by: { kind: 'human'; id: string; channel: 'pi-ui' | 'test' | 'external-ui' }
+  approved_by: { kind: 'human'; id: string; channel: 'pi-ui' }
   status: 'approved' | 'consumed'
   consumed_at: string | null
 }
@@ -854,6 +894,25 @@ export class ProjectMemory {
         })
         continue
       }
+      if (hyd.note.promotion.status !== 'not_promoted' && hyd.note.promotion.target) {
+        const targetPath = hyd.note.promotion.target.path
+        try {
+          const rel = assertProjectRelativePath(this.cwd, targetPath, 'promotion target')
+          rejectSymlinkComponents(this.cwd, path.join(this.cwd, rel), 'promotion target', 'INCONSISTENT')
+          if (hyd.note.promotion.status === 'promoted' && !fs.existsSync(path.join(this.cwd, rel))) {
+            throw new ProjectMemoryError(
+              'INCONSISTENT',
+              `promotion target missing for promoted note: ${rel}`,
+            )
+          }
+        } catch (error) {
+          errors.push({
+            file: raw.file,
+            message: `promotion target invalid: ${error instanceof Error ? error.message : String(error)}`,
+          })
+          continue
+        }
+      }
       const secretHits = findSecretMatches({ note: raw.noteObj, body: raw.body }, rules, '$noteFile')
       if (secretHits.length > 0) {
         errors.push({
@@ -897,7 +956,7 @@ export class ProjectMemory {
     const tagFilter = query.tags?.length ? new Set(query.tags) : null
     const statusMap = new Map(notes.map((nn) => [nn.note.id, nn.note.status]))
 
-    for (const { note: n, file, body } of notes) {
+    for (const { note: n, file, body, sha256 } of notes) {
       if (query.id !== undefined) {
         if (n.id !== query.id) continue
       } else {
@@ -928,7 +987,13 @@ export class ProjectMemory {
         triggerEval = this.evaluateTrigger(n, query.state, statusMap)
         if (query.due && triggerEval.state !== 'due') continue
       }
-      const canonicalConflict = query.state?.canonical_conflicts?.[n.id]
+      const rawConflict = query.state?.canonical_conflicts?.[n.id]
+      // Only evidence bound to the current note revision is effective; stale
+      // evidence (note_sha256 mismatch) must not pollute retrieval.
+      const canonicalConflict =
+        rawConflict && (!rawConflict.note_sha256 || rawConflict.note_sha256 === sha256)
+          ? rawConflict
+          : undefined
       hits.push({
         note: n,
         file,
@@ -1164,12 +1229,13 @@ export class ProjectMemory {
     const due: TriggerResult[] = []
     const unresolved: TriggerResult[] = []
     const not_due: TriggerResult[] = []
-    for (const { note: n } of notes) {
+    for (const { note: n, sha256 } of notes) {
       if (!n.trigger || isTerminalNote(n)) continue
       const r = this.evaluateTrigger(n, state, statusLookup, state.noteStatuses)
-      if (r.state === 'due') due.push(r)
-      else if (r.state === 'unresolved') unresolved.push(r)
-      else if (opts.includeNotDue) not_due.push(r)
+      const tagged = { ...r, note_sha256: sha256 }
+      if (r.state === 'due') due.push(tagged)
+      else if (r.state === 'unresolved') unresolved.push(tagged)
+      else if (opts.includeNotDue) not_due.push(tagged)
     }
     return { due, unresolved, not_due }
   }
@@ -1314,15 +1380,33 @@ export class ProjectMemory {
     }
   }
 
-  /** Persist a single-use approval only after a trusted UI has confirmed the plan. */
+  /** Persist a single-use approval only after a trusted UI has confirmed the plan.
+   *
+   * Trust boundary: this Core API intentionally trusts the caller's `approvedBy`
+   * claim. Only the Pi Extension path (which requires ctx.hasUI and a direct
+   * confirm dialog before reaching this method) is an approved approval source;
+   * channel is pinned to 'pi-ui' and id must be a session URI, so ad-hoc Core
+   * callers cannot mint durable approvals on behalf of a UI without explicitly
+   * impersonating the live Pi session channel.
+   */
   recordPromotionApproval(
     plan: PromotionPlan,
     approvedBy: PromotionApprovalRecord['approved_by'],
   ): PromotionApprovalRecord {
     const cfg = readConfig(this.cwd)
     validatePromotionPlan(plan, cfg.project_id)
-    if (!approvedBy || approvedBy.kind !== 'human' || typeof approvedBy.id !== 'string' || approvedBy.id.trim() === '')
-      throw new ProjectMemoryError('INVALID_INPUT', 'approval must identify the confirming human/UI principal')
+    if (
+      !approvedBy ||
+      approvedBy.kind !== 'human' ||
+      approvedBy.channel !== 'pi-ui' ||
+      typeof approvedBy.id !== 'string' ||
+      !approvedBy.id.startsWith('pi-session://') ||
+      approvedBy.id.trim() === ''
+    )
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'approval must be minted through the live Pi UI channel (channel=pi-ui, id=pi-session://...)',
+      )
     const current = tryReadText(path.join(this.cwd, plan.target.path))
     if (current === null || sha256hex(current) !== plan.before_sha256)
       throw new ProjectMemoryError('CONFLICT', 'canonical target changed before approval could be recorded', {
@@ -1601,8 +1685,12 @@ export class ProjectMemory {
       { waitMs: 15_000, retryMs: 5 },
     )
     try {
+      // Phase 1 (read-only): validate the ENTIRE candidate set and compute all
+      // mutations before writing anything. Any missing/conflicting ID aborts
+      // with zero writes, so a mixed valid+invalid request cannot half-succeed.
       const envelopes = this.pendingCaptureEnvelopes()
       const found = new Set<string>()
+      const mutations: Array<{ envelope: PendingCaptureEnvelope; file: string }> = []
       const resolved: PendingCaptureCandidate[] = []
       const at = new Date().toISOString()
       for (const envelope of envelopes) {
@@ -1624,10 +1712,13 @@ export class ProjectMemory {
           changed = true
           resolved.push(candidate)
         }
-        if (changed) writeFileAtomic(pendingEnvelopePath(this.cwd, envelope.envelope_id), JSON.stringify(envelope, null, 2) + '\n')
+        if (changed) mutations.push({ envelope, file: pendingEnvelopePath(this.cwd, envelope.envelope_id) })
       }
       const missing = ids.filter((id) => !found.has(id))
       if (missing.length) throw new ProjectMemoryError('NOT_FOUND', `pending candidates not found: ${missing.join(', ')}`)
+      // Phase 2: commit all validated mutations.
+      for (const mutation of mutations)
+        writeFileAtomic(mutation.file, JSON.stringify(mutation.envelope, null, 2) + '\n')
       return resolved
     } finally {
       releaseLockFile(lockPath, lockFd)
@@ -1806,22 +1897,35 @@ export class ProjectMemory {
         if (!tgt || !tgt.path)
           issues.push({ severity: 'error', code: 'PROMOTE_NO_TARGET', noteId: note.id, message: 'promoted note has no target path' })
         else {
-          const abs = path.join(this.cwd, tgt.path)
+          let targetRel = tgt.path
+          try {
+            targetRel = assertProjectRelativePath(this.cwd, tgt.path, 'promotion target')
+            rejectSymlinkComponents(this.cwd, path.join(this.cwd, targetRel), 'promotion target', 'INCONSISTENT')
+          } catch (error) {
+            issues.push({
+              severity: 'error',
+              code: 'PROMOTE_TARGET_INVALID',
+              noteId: note.id,
+              message: `promoted target path invalid: ${error instanceof Error ? error.message : String(error)}`,
+            })
+            continue
+          }
+          const abs = path.join(this.cwd, targetRel)
           if (!fs.existsSync(abs)) {
             issues.push({
               severity: 'error',
               code: 'PROMOTE_TARGET_MISSING',
               noteId: note.id,
-              message: `promoted target file missing: ${tgt.path}`,
+              message: `promoted target file missing: ${targetRel}`,
             })
           } else {
-            const ok = backlinkExists(this.cwd, note.id, pro.promotion_id!, tgt.path, pro.backlink)
+            const ok = backlinkExists(this.cwd, note.id, pro.promotion_id!, targetRel, pro.backlink)
             if (!ok)
               issues.push({
                 severity: 'error',
                 code: 'BACKLINK_MISSING',
                 noteId: note.id,
-                message: `promoted note lacks the canonical-side backlink (${pro.backlink ?? 'none'}) for ${tgt.path}`,
+                message: `promoted note lacks the canonical-side backlink (${pro.backlink ?? 'none'}) for ${targetRel}`,
               })
           }
         }
@@ -2016,6 +2120,20 @@ function sourceKey(s: SourceRef): string {
 
 function formatIssues(issues: { field?: string; message: string }[]): string {
   return issues.map((i) => `${i.field ?? 'note'}: ${i.message}`).join('; ')
+}
+
+/**
+ * Static path-shape guard for persisted promotion metadata. Rejects absolute
+ * paths, `..` escapes, and anything inside .project-memory before any dynamic
+ * (symlink/existence) check runs. The dynamic checks live in scan()/reconcile().
+ */
+function isUnsafeProjectRelativePath(relPath: string): boolean {
+  if (path.isAbsolute(relPath)) return true
+  const segments = relPath.split('/')
+  if (segments.some((segment) => segment === '..' || segment === '')) return true
+  if (relPath === MEMORY_ROOT_NAME) return true
+  if (relPath.startsWith(MEMORY_ROOT_NAME + '/')) return true
+  return false
 }
 
 /** Coerce a raw parsed frontmatter object into a typed Note (best effort). */
