@@ -485,6 +485,82 @@ test("approval minting is restricted to the live Pi UI channel", () => {
   assert.match(approval.approval_ref, /^pa_[0-9a-f]{32}$/);
 });
 
+test("recordPromotionApproval rejects a forged plan whose target escapes the project", () => {
+  const { cwd, memory } = fixture();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-forged-plan-"));
+  fs.writeFileSync(path.join(outside, "evil.md"), "# Never read\n");
+  const plan = {
+    project_id: "fixture",
+    note_id: "PM-IDE-0001",
+    promotion_id: "forged-plan-1",
+    target: { kind: "spec" as const, ref: "../outside/evil.md", path: "../outside/evil.md" },
+    mode: "append_block" as const,
+    payload_content: "## Forged block",
+    payload_sha256: "0".repeat(64),
+    before_sha256: "0".repeat(64),
+    after_sha256: "0".repeat(64),
+    planned_at: new Date().toISOString(),
+    before_content: "",
+    after_content: "",
+  };
+  expectCode(
+    () =>
+      memory.recordPromotionApproval(plan, {
+        kind: "human",
+        id: "pi-session://forged",
+        channel: "pi-ui",
+      }),
+    "INVALID_INPUT",
+  );
+});
+
+test("a hand-crafted approval JSON cannot bypass the live UI capability", () => {
+  const { cwd, memory } = fixture();
+  const captured = memory.capture(input("idea", "forged-approval"));
+  const approvalsDir = path.join(cwd, ".project-memory", "approvals");
+  fs.mkdirSync(approvalsDir, { recursive: true });
+  const forgedRef = `pa_${`a`.repeat(32)}`;
+  const plan = memory.planPromotion(captured.id, {
+    promotion_id: "forged-approval-1",
+    target: { kind: "spec", path: "SPEC.md" },
+    insertBlock: "## Forged approval\n",
+  });
+  // Write an approval record that LOOKS perfect but was never minted in this
+  // process (no live capability) — e.g. an attacker or a stale backup.
+  fs.writeFileSync(
+    path.join(approvalsDir, `${forgedRef}.json`),
+    JSON.stringify({
+      schema_version: 1,
+      approval_ref: forgedRef,
+      project_id: "fixture",
+      note_id: captured.id,
+      promotion_id: "forged-approval-1",
+      target: plan.target,
+      mode: "append_block",
+      payload_sha256: plan.payload_sha256,
+      before_sha256: plan.before_sha256,
+      after_sha256: plan.after_sha256,
+      planned_at: plan.planned_at,
+      approved_at: new Date().toISOString(),
+      approved_by: { kind: "human", id: "pi-session://forged", channel: "pi-ui" },
+      status: "approved",
+      consumed_at: null,
+    }, null, 2) + "\n",
+  );
+  expectCode(
+    () =>
+      memory.promote(captured.id, {
+        approval_ref: forgedRef,
+        promotion_id: "forged-approval-1",
+        target: { kind: "spec", path: "SPEC.md" },
+        insertBlock: "## Forged approval\n",
+      }),
+    "POLICY_VIOLATION",
+  );
+  assert.equal(fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8"), "# Canonical Spec\n");
+  assert.equal(memory.read(captured.id)!.note.promotion.status, "not_promoted");
+});
+
 test("runtime validation aligns with JSON Schema for created_by and source_refs", () => {
   const { memory } = fixture();
   const captured = memory.capture(input("idea", "schema-align"));
@@ -501,6 +577,36 @@ test("runtime validation aligns with JSON Schema for created_by and source_refs"
   writeNoteFile(secondFile.file, secondFile.note, secondFile.body);
   const secondReport = memory.reconcile({ fixIndex: true });
   assert.ok(secondReport.issues.some((issue) => issue.code === "SCHEMA" && /source_refs\[0\]\.excerpt_sha256/.test(issue.message)));
+});
+
+test("forged promotion.backlink / backlink_verified values are quarantined at read", () => {
+  const { memory } = fixture();
+  const captured = memory.capture(input("idea", "forged-backlink"));
+  const plan = memory.planPromotion(captured.id, {
+    promotion_id: "forged-backlink-1",
+    target: { kind: "spec", path: "SPEC.md" },
+    insertBlock: "## Forged backlink test\n",
+  });
+  const approval = memory.recordPromotionApproval(plan, {
+    kind: "human",
+    id: "pi-session://backlink",
+    channel: "pi-ui",
+  });
+  const promoted = memory.promote(captured.id, {
+    approval_ref: approval.approval_ref,
+    promotion_id: "forged-backlink-1",
+    target: { kind: "spec", path: "SPEC.md" },
+    insertBlock: "## Forged backlink test\n",
+  });
+  assert.equal(promoted.status, "promoted");
+
+  // Hand-set an illegal backlink value; the note must be quarantined.
+  const file = memory.read(captured.id)!;
+  file.note.promotion.backlink = "forged" as never;
+  writeNoteFile(file.file, file.note, file.body);
+  assert.equal(memory.read(captured.id), null);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "SCHEMA" && /promotion\.backlink/.test(issue.message)));
 });
 
 test("promotion approval is content-bound and CAS refuses a target changed after review", () => {
@@ -688,17 +794,23 @@ test("pending-capture envelopes survive a fresh service instance until candidate
 
 test("concurrent promotes to one canonical target serialize to exactly one winner", { timeout: 30_000 }, async () => {
   const { cwd, memory } = fixture();
+  // Each worker completes the whole live-UI flow (plan -> record approval ->
+  // promote) inside its own process, because live capabilities are
+  // process-local: a cross-process approval_ref can never be consumed.
   const worker = `
     import fs from 'node:fs';
     import { ProjectMemory } from ${JSON.stringify(path.join(projectRoot, "src", "index.ts"))};
     while (!fs.existsSync(process.env.PM_GO)) await new Promise(r => setTimeout(r, 1));
     try {
-      const out = new ProjectMemory(process.env.PM_CWD).promote(process.env.PM_ID, {
-        approval_ref: process.env.PM_APPROVAL,
+      const pm = new ProjectMemory(process.env.PM_CWD);
+      const request = {
         promotion_id: process.env.PM_PROMOTION,
         target: { kind: 'spec', path: process.env.PM_TARGET },
         insertBlock: '## ' + process.env.PM_ID
-      });
+      };
+      const plan = pm.planPromotion(process.env.PM_ID, request);
+      const approval = pm.recordPromotionApproval(plan, {kind:'human',id:'pi-session://worker-'+process.env.PM_ID,channel:'pi-ui'});
+      const out = pm.promote(process.env.PM_ID, { ...request, approval_ref: approval.approval_ref });
       process.stdout.write(JSON.stringify({ok:true,id:out.id}));
     } catch (error) {
       process.stdout.write(JSON.stringify({ok:false,code:error.code}));
@@ -711,18 +823,8 @@ test("concurrent promotes to one canonical target serialize to exactly one winne
     const second = memory.capture(input("idea", `promote-race-${round}-b`));
     const firstPromotion = `race-${round}-a`;
     const secondPromotion = `race-${round}-b`;
-    const firstApproved = approvePromotion(memory, first.id, {
-      promotion_id: firstPromotion,
-      target: { kind: "spec", path: target },
-      insertBlock: `## ${first.id}`,
-    });
-    const secondApproved = approvePromotion(memory, second.id, {
-      promotion_id: secondPromotion,
-      target: { kind: "spec", path: target },
-      insertBlock: `## ${second.id}`,
-    });
     const go = path.join(cwd, `GO-${round}`);
-    const run = (id: string, promotion: string, approval: string) =>
+    const run = (id: string, promotion: string) =>
       execFileAsync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", worker], {
         cwd: projectRoot,
         env: {
@@ -732,11 +834,10 @@ test("concurrent promotes to one canonical target serialize to exactly one winne
           PM_ID: id,
           PM_PROMOTION: promotion,
           PM_TARGET: target,
-          PM_APPROVAL: approval,
         },
       }).then(({ stdout }) => JSON.parse(stdout) as { ok: boolean; id?: string; code?: string });
-    const left = run(first.id, firstPromotion, firstApproved.approval_ref);
-    const right = run(second.id, secondPromotion, secondApproved.approval_ref);
+    const left = run(first.id, firstPromotion);
+    const right = run(second.id, secondPromotion);
     await new Promise((resolve) => setTimeout(resolve, 25));
     fs.writeFileSync(go, "go");
     const results = await Promise.all([left, right]);

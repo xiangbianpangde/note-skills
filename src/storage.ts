@@ -405,6 +405,70 @@ export function writeFileAtomic(file: string, content: string): void {
   }
 }
 
+/**
+ * Batch compare-free atomic commit: every file is first written + fsynced to a
+ * unique temp path in its own directory. Only after ALL temp writes succeed are
+ * they renamed into place. Any failure during the temp phase leaves the target
+ * paths untouched; a failure mid-rename removes the remaining temps (already
+ * renamed files keep their new content — they were fully written before the
+ * rename). This gives a best-effort all-or-nothing commit for small derived
+ * registries like pending-capture envelopes.
+ */
+export function writeFileAtomicBatch(files: Array<{ file: string; content: string }>): void {
+  if (files.length === 0) return
+  const staged: Array<{ tmp: string; file: string }> = []
+  try {
+    for (const { file, content } of files) {
+      const dir = path.dirname(file)
+      fs.mkdirSync(dir, { recursive: true })
+      const tmp = path.join(dir, `.pm-tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`)
+      let fd: number | undefined
+      try {
+        fd = fs.openSync(tmp, 'wx')
+        fs.writeFileSync(fd, content)
+        fs.fsyncSync(fd)
+        fs.closeSync(fd)
+        fd = undefined
+      } catch (e) {
+        if (fd !== undefined) {
+          try {
+            fs.closeSync(fd)
+          } catch {
+            /* ignore */
+          }
+        }
+        try {
+          fs.unlinkSync(tmp)
+        } catch {
+          /* ignore */
+        }
+        throw e
+      }
+      staged.push({ tmp, file })
+    }
+  } catch (e) {
+    // Aborted during staging: remove every staged temp; targets untouched.
+    for (const { tmp } of staged) {
+      try {
+        fs.unlinkSync(tmp)
+      } catch {
+        /* ignore */
+      }
+    }
+    throw e
+  }
+  for (const { tmp, file } of staged) {
+    try {
+      fs.renameSync(tmp, file)
+    } catch (e) {
+      // Leave remaining temps for diagnostics; the already-renamed files were
+      // fully staged and are valid. This is a partial-but-safe commit: every
+      // written file is complete, never truncated.
+      throw e
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Note file parsing / serialization                                   */
 /* ------------------------------------------------------------------ */

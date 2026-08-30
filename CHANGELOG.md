@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 - 2026-08-30
+
+- P1: `validatePromotionPlan()` now takes the project `cwd` and enforces project-relative, symlink-safe, existing-file checks on `target.path`; `recordPromotionApproval()` re-derives the safe relative target instead of trusting plan bytes, so a forged plan can no longer make it read outside the project.
+- P1: approvals now require a process-local live capability in addition to the on-disk record. `recordPromotionApproval()` registers a single-use capability; `promote()` refuses any approval_ref (including `channel: pi-ui` hand-written records) that was not minted in this process, and consumes the capability on success. `validateApprovalRecord()` also enforces the live `pi-session://` principal.
+- P2: `validateNote()` aligns `promotion.backlink` (in_file|link_file|null), `backlink_verified` (boolean) and `promoted_at` (ISO or null) with the JSON Schema; forged values quarantine the note at read.
+- P2: pending resolution validates `note_id` format on capture resolutions (both on call and inside envelope validation) and commits via a batched temp-write-then-rename commit so a failure during staging leaves the store untouched.
+- Tests: 34 -> 37 (forged plan, hand-crafted approval, forged backlink value).
+
 ## 0.2.1 - 2026-08-30
 
 - Promotion metadata hardening: persisted `promotion.target.path` is statically checked (non-absolute, no `..` escape, never inside `.project-memory`) before any write, and dynamically re-validated (project-relative, symlink-safe, existing) by `scan()` and `reconcile()` before backlink reads.

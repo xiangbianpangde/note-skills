@@ -78,6 +78,7 @@ import {
   writeNoteFile,
   writeNoteFileCas,
   writeFileAtomic,
+  writeFileAtomicBatch,
   tryReadText,
   relPath,
   sha256hex,
@@ -430,10 +431,16 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
     }
     if (typeof pro.promotion_id !== 'string' || pro.promotion_id === '')
       bad('promotion.promotion_id', 'required once promoting/promoted (invariant 7)')
+    if (pro.backlink !== null && !['in_file', 'link_file'].includes(pro.backlink))
+      bad('promotion.backlink', `must be one of in_file|link_file|null, got ${JSON.stringify(pro.backlink)}`)
+    if (typeof pro.backlink_verified !== 'boolean')
+      bad('promotion.backlink_verified', 'must be a boolean')
+    if (pro.promoted_at !== null && typeof pro.promoted_at !== 'string')
+      bad('promotion.promoted_at', 'must be an ISO-8601 string or null')
     if (pro.status === 'promoted') {
       if (pro.backlink === null) bad('promotion.backlink', 'required when promoted (invariant 8)')
       if (!pro.backlink_verified) bad('promotion.backlink_verified', 'must be true when promoted')
-      if (pro.promoted_at === null) bad('promotion.promoted_at', 'required when promoted')
+      if (pro.promoted_at === null || !isIso(pro.promoted_at)) bad('promotion.promoted_at', 'required ISO-8601 when promoted')
     }
   }
 
@@ -1394,7 +1401,7 @@ export class ProjectMemory {
     approvedBy: PromotionApprovalRecord['approved_by'],
   ): PromotionApprovalRecord {
     const cfg = readConfig(this.cwd)
-    validatePromotionPlan(plan, cfg.project_id)
+    validatePromotionPlan(plan, this.cwd, cfg.project_id)
     if (
       !approvedBy ||
       approvedBy.kind !== 'human' ||
@@ -1407,7 +1414,10 @@ export class ProjectMemory {
         'INVALID_INPUT',
         'approval must be minted through the live Pi UI channel (channel=pi-ui, id=pi-session://...)',
       )
-    const current = tryReadText(path.join(this.cwd, plan.target.path))
+    // Never trust the plan's path bytes: re-derive the safe project-relative
+    // target inside the validated boundary, then read exactly that file.
+    const safeRel = assertProjectRelativePath(this.cwd, plan.target.path, 'promotion target')
+    const current = tryReadText(path.join(this.cwd, safeRel))
     if (current === null || sha256hex(current) !== plan.before_sha256)
       throw new ProjectMemoryError('CONFLICT', 'canonical target changed before approval could be recorded', {
         target: plan.target.path,
@@ -1415,6 +1425,16 @@ export class ProjectMemory {
         actual: current === null ? null : sha256hex(current),
       })
     const approvalRef = `pa_${crypto.randomBytes(16).toString('hex')}`
+    // Register the single-use capability in-process. Only a live UI
+    // confirmation that reached this method can mint it; a hand-crafted
+    // approval JSON on disk has no capability and cannot be consumed.
+    registerLiveApproval(approvalRef, {
+      note_id: plan.note_id,
+      promotion_id: plan.promotion_id,
+      before_sha256: plan.before_sha256,
+      after_sha256: plan.after_sha256,
+      payload_sha256: plan.payload_sha256,
+    })
     const record: PromotionApprovalRecord = {
       schema_version: 1,
       approval_ref: approvalRef,
@@ -1445,6 +1465,17 @@ export class ProjectMemory {
     const initialApproval = readApprovalRecord(this.cwd, opts.approval_ref)
     if (!initialApproval)
       throw new ProjectMemoryError('INVALID_INPUT', `approval_ref ${opts.approval_ref} does not exist`)
+    // The approval file on disk is NOT proof of approval: only a capability
+    // minted in this process (after the user confirmed the exact bytes in the
+    // live Pi UI) can authorize the canonical write. Replayed verifications
+    // of an already-promoted note are still allowed if the record is consumed.
+    const liveCapability = getLiveApproval(opts.approval_ref)
+    if (!liveCapability && initialApproval.status !== 'consumed')
+      throw new ProjectMemoryError(
+        'POLICY_VIOLATION',
+        'approval_ref has no live capability in this process — re-confirm the exact target bytes through the Pi UI',
+        { approval_ref: opts.approval_ref },
+      )
     const prepared = resolvePromotionTarget(this.cwd, opts)
     collectSecrets(cfg, { target: prepared.target, payload: prepared.payload }, '$promotion')
     assertApprovalBinding(initialApproval, cfg.project_id, id, opts, prepared)
@@ -1673,8 +1704,8 @@ export class ProjectMemory {
       throw new ProjectMemoryError('INVALID_INPUT', 'candidate_ids must contain at least one valid pending candidate ID')
     if (!resolution.tool_call_id?.trim())
       throw new ProjectMemoryError('INVALID_INPUT', 'pending resolution requires the real tool_call_id')
-    if (resolution.status === 'captured' && !resolution.note_id)
-      throw new ProjectMemoryError('INVALID_INPUT', 'captured pending candidates require note_id')
+    if (resolution.status === 'captured' && (!resolution.note_id || !NOTE_ID_RE.test(resolution.note_id)))
+      throw new ProjectMemoryError('INVALID_INPUT', 'captured pending candidates require a valid note_id')
     if (resolution.status === 'skipped' && !resolution.reason?.trim())
       throw new ProjectMemoryError('INVALID_INPUT', 'skipped pending candidates require a concrete reason')
 
@@ -1716,9 +1747,16 @@ export class ProjectMemory {
       }
       const missing = ids.filter((id) => !found.has(id))
       if (missing.length) throw new ProjectMemoryError('NOT_FOUND', `pending candidates not found: ${missing.join(', ')}`)
-      // Phase 2: commit all validated mutations.
-      for (const mutation of mutations)
-        writeFileAtomic(mutation.file, JSON.stringify(mutation.envelope, null, 2) + '\n')
+      // Phase 2: commit all validated mutations. Each envelope is written to a
+      // temporary file first; only after every temp write succeeds are they
+      // renamed into place. A failure before the rename loop leaves the store
+      // untouched, so a batch commit cannot half-apply resolutions.
+      commitPendingMutations(
+        mutations.map((mutation) => ({
+          file: mutation.file,
+          content: JSON.stringify(mutation.envelope, null, 2) + '\n',
+        })),
+      )
       return resolved
     } finally {
       releaseLockFile(lockPath, lockFd)
@@ -2258,7 +2296,13 @@ function buildCanonicalAfterContent(
   return base
 }
 
-function validatePromotionPlan(plan: PromotionPlan, projectId: string): void {
+/**
+ * Validate a promotion plan against the REAL project: the target path must be
+ * a project-relative, non-symlink, existing file before any of its bytes can
+ * be read or hashed. Without the cwd check, a forged plan could point outside
+ * the project and recordPromotionApproval() would read it.
+ */
+function validatePromotionPlan(plan: PromotionPlan, cwd: string, projectId: string): void {
   if (!plan || plan.project_id !== projectId || !NOTE_ID_RE.test(plan.note_id))
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan has the wrong project or Note identity')
   if (!PROMOTION_ID_RE.test(plan.promotion_id) || !isIso(plan.planned_at))
@@ -2271,6 +2315,17 @@ function validatePromotionPlan(plan: PromotionPlan, projectId: string): void {
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan content hash mismatch')
   if (!/^[0-9a-f]{64}$/.test(plan.before_sha256) || !/^[0-9a-f]{64}$/.test(plan.after_sha256))
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan hashes must be lowercase SHA-256')
+  if (!plan.target || typeof plan.target !== 'object')
+    throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan has no target')
+  if (typeof plan.target.kind !== 'string' || plan.target.kind.trim() === '' || typeof plan.target.ref !== 'string' || plan.target.ref.trim() === '')
+    throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan target kind/ref must be non-empty strings')
+  if (typeof plan.target.path !== 'string' || isUnsafeProjectRelativePath(plan.target.path))
+    throw new ProjectMemoryError('INVALID_INPUT', 'promotion plan target path must be project-relative and safe')
+  const rel = assertProjectRelativePath(cwd, plan.target.path, 'promotion target')
+  const abs = path.join(cwd, rel)
+  rejectSymlinkComponents(cwd, abs, 'promotion target', 'INCONSISTENT')
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isFile())
+    throw new ProjectMemoryError('INVALID_INPUT', `promotion target must be an existing file: ${rel}`)
 }
 
 function approvalRecordPath(cwd: string, approvalRef: string): string {
@@ -2305,8 +2360,12 @@ function validateApprovalRecord(record: PromotionApprovalRecord, projectId: stri
     throw new ProjectMemoryError('INCONSISTENT', 'malformed promotion approval record')
   if (record.project_id !== projectId || !NOTE_ID_RE.test(record.note_id) || !PROMOTION_ID_RE.test(record.promotion_id))
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has invalid identity binding`)
-  if (!record.target || typeof record.target.path !== 'string' || record.target.path === '')
+  if (!record.target || typeof record.target !== 'object')
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has no target`)
+  if (typeof record.target.path !== 'string' || record.target.path.trim() === '' || isUnsafeProjectRelativePath(record.target.path))
+    throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has an unsafe target path`)
+  if (typeof record.target.kind !== 'string' || record.target.kind.trim() === '' || typeof record.target.ref !== 'string' || record.target.ref.trim() === '')
+    throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has incomplete target kind/ref`)
   if (!['replace_file', 'append_block'].includes(record.mode))
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has invalid mode`)
   for (const hash of [record.payload_sha256, record.before_sha256, record.after_sha256])
@@ -2314,14 +2373,54 @@ function validateApprovalRecord(record: PromotionApprovalRecord, projectId: stri
       throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has an invalid SHA-256 binding`)
   if (!isIso(record.planned_at) || !isIso(record.approved_at))
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has invalid timestamps`)
-  if (!record.approved_by || record.approved_by.kind !== 'human' || !record.approved_by.id)
-    throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} lacks a human/UI principal`)
+  if (
+    !record.approved_by ||
+    record.approved_by.kind !== 'human' ||
+    record.approved_by.channel !== 'pi-ui' ||
+    typeof record.approved_by.id !== 'string' ||
+    !record.approved_by.id.startsWith('pi-session://') ||
+    record.approved_by.id.trim() === ''
+  )
+    throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} lacks a live-Pi-UI-principal`)
   if (!['approved', 'consumed'].includes(record.status))
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} has invalid status`)
   if (record.status === 'approved' && record.consumed_at !== null)
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} is approved but already timestamped consumed`)
   if (record.status === 'consumed' && (!record.consumed_at || !isIso(record.consumed_at)))
     throw new ProjectMemoryError('INCONSISTENT', `approval ${record.approval_ref} lacks consumed_at`)
+}
+
+/* ------------------------------------------------------------------ */
+/* Process-local approval capability registry                          */
+/* ------------------------------------------------------------------ */
+
+interface LiveCapability {
+  note_id: string
+  promotion_id: string
+  before_sha256: string
+  after_sha256: string
+  payload_sha256: string
+}
+
+/**
+ * Approval files on disk are data, not credentials: a hand-written JSON under
+ * .project-memory/approvals/ proves nothing. Only a capability minted in THIS
+ * process by recordPromotionApproval() (which itself requires a live Pi UI
+ * confirmation) can authorize the canonical mutation. The registry is
+ * process-local; a restarted session must re-confirm before promoting.
+ */
+const liveApprovalCapabilities = new Map<string, LiveCapability>()
+
+function registerLiveApproval(approvalRef: string, capability: LiveCapability): void {
+  liveApprovalCapabilities.set(approvalRef, capability)
+}
+
+function getLiveApproval(approvalRef: string): LiveCapability | null {
+  return liveApprovalCapabilities.get(approvalRef) ?? null
+}
+
+function unregisterLiveApproval(approvalRef: string): void {
+  liveApprovalCapabilities.delete(approvalRef)
 }
 
 function readApprovalRecord(cwd: string, approvalRef: string): PromotionApprovalRecord | null {
@@ -2383,6 +2482,7 @@ function consumeApprovalRecord(cwd: string, approval: PromotionApprovalRecord): 
   const reread = readApprovalRecord(cwd, approval.approval_ref)
   if (!reread || reread.status !== 'consumed')
     throw new ProjectMemoryError('INTERNAL', `approval consumption readback failed: ${approval.approval_ref}`)
+  unregisterLiveApproval(approval.approval_ref)
 }
 
 function writeCanonicalCas(
@@ -2405,6 +2505,11 @@ function writeCanonicalCas(
   const reread = tryReadText(file)
   if (reread === null || sha256hex(reread) !== expectedAfterSha256)
     throw new ProjectMemoryError('INTERNAL', `canonical CAS readback failed: ${file}`)
+}
+
+/** Thin service-layer wrapper so resolvePendingCapture reads as a single commit step. */
+function commitPendingMutations(files: Array<{ file: string; content: string }>): void {
+  writeFileAtomicBatch(files)
 }
 
 function pendingEnvelopePath(cwd: string, envelopeId: string): string {
@@ -2437,8 +2542,8 @@ function validatePendingEnvelope(envelope: PendingCaptureEnvelope, projectId: st
       const resolution = candidate.resolution
       if (!['captured', 'skipped'].includes(resolution.status) || !isIso(resolution.resolved_at) || !resolution.tool_call_id)
         throw new ProjectMemoryError('INCONSISTENT', `candidate ${candidate.candidate_id} has invalid resolution`)
-      if (resolution.status === 'captured' && !resolution.note_id)
-        throw new ProjectMemoryError('INCONSISTENT', `candidate ${candidate.candidate_id} captured without note_id`)
+      if (resolution.status === 'captured' && (!resolution.note_id || !NOTE_ID_RE.test(resolution.note_id)))
+        throw new ProjectMemoryError('INCONSISTENT', `candidate ${candidate.candidate_id} captured without a valid note_id`)
       if (resolution.status === 'skipped' && !resolution.reason)
         throw new ProjectMemoryError('INCONSISTENT', `candidate ${candidate.candidate_id} skipped without reason`)
     }

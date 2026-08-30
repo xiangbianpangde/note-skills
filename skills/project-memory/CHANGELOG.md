@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 - 2026-08-30
+
+- Promotion approval is now a process-local single-use capability, not just a JSON file: only a live Pi UI confirmation in the same process can mint a consumable approval_ref.
+- Promotion plans are validated against the real project root (target path must be project-relative, non-symlink, existing) before approval record persistence.
+- `promotion.backlink` / `backlink_verified` / `promoted_at` follow the JSON Schema; forged values are quarantined.
+
 ## 0.2.1 - 2026-08-30
 
 - Promote approval is pinned to the live Pi UI channel (`pi-session://` principal); ad-hoc approval minting is rejected.
