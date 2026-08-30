@@ -1,0 +1,59 @@
+{
+  "name": "pi-project-memory",
+  "version": "0.1.1",
+  "description": "Filesystem-first prospective project memory for Pi with capture gates, trigger-based retrieval, promotion, and reconciliation.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agent-skill",
+    "project-memory",
+    "prospective-memory",
+    "notes"
+  ],
+  "license": "MIT",
+  "files": [
+    "extensions",
+    "schemas",
+    "skills",
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/project-memory.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:core": "node --experimental-strip-types --test tests/core.test.ts",
+    "test:extension": "node --experimental-strip-types --test tests/extension.test.ts",
+    "typecheck": "tsc --noEmit",
+    "validate:skill": "python3 ~/.pi/agent/skills/task/skill-authoring/scripts/validate.py --strict skills/project-memory"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": ">=0.84.2",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
+    "@types/node": "^22.0.0",
+    "typebox": "^1.0.64",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
