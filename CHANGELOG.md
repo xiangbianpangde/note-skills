@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 - 2026-08-30
+
+- P1: Mandatory Capture Gate binding closed. New Core primitive `captureAndResolvePending(candidateIds, input, toolCallId)` creates/merges the Note and binds the candidate in one flow with type + provenance verification; `resolvePendingCapture()` now rejects nonexistent notes, wrong-type notes, and notes whose `source_refs` do not reference the candidate provenance. A risk candidate can no longer be settled by an unrelated idea note or a fabricated note ID.
+- P1: removed the run-wide `handledThisRun` suppression. `agent_end` always scans; duplicates are deduped per-candidate by (type, markers, source leaf, excerpt hash). Processing one signal no longer hides NEW signals later in the same run.
+- P2: capture+resolution are now validated as one call (side effects reported explicitly: on resolution failure the committed note ID is returned in the error details instead of a plain failure).
+- P2: harness provenance is authoritative and cannot be replaced: the real Pi session/leaf is always the first source_ref; model-supplied `source_ref/source_kind/source_turn_id` are appended only as additional claimed sources.
+- P2: `update()` cannot enter a terminal status without a non-empty `status_reason` and cannot reopen a terminal note; only `close()`/`promote()` handle terminal transitions.
+- P2: trusted scan now quarantines notes with stripped required review fields (no silent `clear` default), tampered fingerprints (recomputed as `fingerprintOf(type,title,summary)`), duplicate-ID groups, and secrets hidden in object keys.
+- P2: custom secret patterns are validated at config load (parse errors, nested quantifiers / ReDoS, >512 chars fail closed with `INCONSISTENT`).
+- Tests: 43 -> 51 (pending settlement binding, atomic bind, stripped-required, fingerprint tamper, duplicate ID, secret-in-key, terminal bypass, dangerous regex).
+
 ## 0.2.4 - 2026-08-30
 
 - P2: `CanonicalTarget.objectId/version` are now validated as optional strings at every boundary — target resolution (`resolvePromotionTarget`), promotion plan validation, approval-record validation (`INCONSISTENT` for malformed disk records) — BEFORE any canonical write or approval record is created. Numeric values no longer reach the note write, so a malformed target cannot produce an unreadable note after a successful-looking write.

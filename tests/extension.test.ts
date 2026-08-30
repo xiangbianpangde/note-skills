@@ -195,9 +195,32 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
     undefined as never,
     ctx as never,
   );
+  // New semantics: a successful capture does NOT suppress later end-of-run
+  // detection. The unhandled signal still produces a pending candidate (unless
+  // it was bound via candidate_ids, which is the only form of "handled").
   events.get("agent_end")!({ messages: [{ role: "user", content: "P1 later" }] }, ctx as never);
-  assert.equal(sent.length, 0);
-  assert.equal(entries.length, 1);
+  assert.equal(sent.length, 1);
+  assert.equal((sent[0] as { customType: string }).customType, "project-memory-capture-gate");
+  const pendingAfterCapture = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.ok(pendingAfterCapture.length >= 1);
+  // Resolve it via acknowledge with candidate_ids, then re-run agent_end with
+  // the SAME signal: no duplicate candidate should be persisted (dedup by
+  // type+markers+source leaf+excerpt hash).
+  await tools[0]!.execute(
+    "call-ack" as never,
+    {
+      action: "acknowledge",
+      candidate_ids: [pendingAfterCapture[0]!.candidate_id],
+      skip_reason: "False positive marker in a quoted review",
+    } as never,
+    new AbortController().signal as never,
+    undefined as never,
+    ctx as never,
+  );
+  const beforeSecond = sent.length;
+  events.get("agent_end")!({ messages: [{ role: "user", content: "P1 later" }] }, ctx as never);
+  assert.equal(sent.length, beforeSecond, "resolved candidate must not re-trigger the gate");
+  assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 0);
   const receipt = entries[0] as { type: string; data: { gate: string; tool_call_id: string; id: string } };
   assert.equal(receipt.type, "project-memory-receipt");
   assert.equal(receipt.data.gate, "capture");
@@ -227,11 +250,10 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
   assert.match(approvalPrompt, /# Approved canonical definition/);
   assert.match(canonical, /^# Approved canonical definition/);
   assert.doesNotMatch(canonical, /Old canonical|Duplicate section/);
-  const promoteReceipt = entries[1] as {
-    type: string;
-    data: { gate: string; tool_call_id: string; id: string; mode: string };
-  };
-  assert.equal(promoteReceipt.data.gate, "promote");
-  assert.equal(promoteReceipt.data.tool_call_id, "call-2");
-  assert.equal(promoteReceipt.data.mode, "replace_file");
+  const promoteReceipt = entries
+    .map((entry) => entry as { type: string; data?: { gate?: string; tool_call_id?: string; mode?: string } })
+    .find((entry) => entry.data?.gate === "promote")!;
+  assert.equal(promoteReceipt.data!.gate, "promote");
+  assert.equal(promoteReceipt.data!.tool_call_id, "call-2");
+  assert.equal(promoteReceipt.data!.mode, "replace_file");
 });

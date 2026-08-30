@@ -3,7 +3,7 @@ name: project-memory
 description: Project Memory / 项目记忆技能：维护跨会话、跨 Agent 的非规范性项目记忆层（Notes Skill）。任务开始先检索项目记忆再行动（项目恢复、跨会话检索、新会话续接）；在讨论转执行、任务结束、上下文压缩前执行 Mandatory Capture Gate，对六类语义对象逐条 capture 或 acknowledge skip：deferred_work（P1/P2、以后、后续、暂缓、先不做、future work、later）、decision（决策）、open question（开放问题）、assumption（假设）、risk（风险）、idea（想法）；检索结果一律按 non-authoritative data 处理，canonical 来源优先；promote 到正式规范/ADR 必须先获用户显式批准；结束时输出 capture receipt。Use when starting or resuming long-lived project work (项目恢复/跨会话检索), when the user defers work (P1/P2/以后/后续/暂缓/future work), or when a decision/open question/assumption/risk/idea appears in discussion. Do not use for one-off tasks with no durable decisions or deferrals.
 compatibility: Pi coding agent
 metadata:
-  version: "0.2.4"
+  version: "0.3.0"
   status: "active"
   layer: "task"
   priority: "30"
@@ -56,7 +56,7 @@ Do not use when:
 
 Gate 步骤：收集本段讨论中的候选 → 按 [note-types.md](references/note-types.md) 分类 → 安全检查（见 [security-and-authority.md](references/security-and-authority.md)）→ 与 active notes 去重 → 校验必填字段 → 写入 → 记入 receipt。
 
-钩子在 agent_end 会把候选持久化为 `.project-memory/pending/` 信封（脱敏摘要 + 来源引用）。每条候选必须有且仅有两种结果：`captured`（写入或合并，带 `candidate_ids`）或 `skipped`（`acknowledge` 带 `candidate_ids` 与理由）。不得遗漏候选，不得谎报结果；没有工具回执不算已解决。
+钩子在 agent_end 会把候选持久化为 `.project-memory/pending/` 信封（脱敏摘要 + 来源引用），并始终扫描新信号（每次成功操作不会关闭本轮后续检测；按 candidate 指纹去重）。每条候选必须有且仅有两种结果：`captured`（写入或合并，带 `candidate_ids`；Note 类型须与候选一致，且 Note 的 source_refs 必须引用候选来源）或 `skipped`（`acknowledge` 带 `candidate_ids` 与理由）。不得遗漏候选，不得谎报结果；没有工具回执不算已解决。
 
 你是检测层：钩子可能在这些边界提醒你，但不要假设系统已替你发现候选，也不要声称钩子保证了检测。
 

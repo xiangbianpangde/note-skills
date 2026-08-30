@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import {
+  fingerprintOf,
   ProjectMemory,
   ProjectMemoryError,
   parseNoteFile,
@@ -1206,5 +1207,263 @@ test("capability holds a deep copy of the target: mutating plan.target afterward
         insertBlock: "## Copy test\n",
       }),
     "CONFLICT",
+  );
+});
+
+test("pending settlement rejects unrelated type, nonexistent note, and missing provenance", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const candId = `cand_${`1`.repeat(32)}`;
+  const envelope = {
+    schema_version: 1 as const,
+    envelope_id: `pc_${`2`.repeat(32)}`,
+    project_id: "fixture",
+    session_id: "session-bind",
+    source_leaf_id: "leaf-bind",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId,
+        type: "risk" as const,
+        markers: ["risk"],
+        source_ref: { kind: "conversation" as const, ref: "pi-session://session-bind", turn_id: "leaf-bind" },
+        source_excerpt: "a risk",
+        source_excerpt_sha256: "3".repeat(64),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  };
+  memory.persistPendingCapture(envelope);
+  // A nonexistent note id is rejected.
+  expectCode(
+    () =>
+      memory.resolvePendingCapture([candId], { status: "captured", tool_call_id: "c1", note_id: "PM-IDE-9999" }),
+    "NOT_FOUND",
+  );
+  // A wrong-type idea note is rejected.
+  const idea = memory.capture(input("idea", "wrong-type-settle"));
+  expectCode(
+    () =>
+      memory.resolvePendingCapture([candId], { status: "captured", tool_call_id: "c2", note_id: idea.id }),
+    "INVALID_INPUT",
+  );
+  // A risk note whose source_ref does NOT reference the candidate provenance is rejected.
+  const risk = memory.capture(input("risk", "no-provenance-settle"));
+  expectCode(
+    () =>
+      memory.resolvePendingCapture([candId], { status: "captured", tool_call_id: "c3", note_id: risk.id }),
+    "INVALID_INPUT",
+  );
+  assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 1);
+});
+
+test("captureAndResolvePending validates type + provenance and binds in one call", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const candId = `cand_${`4`.repeat(32)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`5`.repeat(32)}`,
+    project_id: "fixture",
+    session_id: "session-atomic",
+    source_leaf_id: "leaf-atomic",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId,
+        type: "risk",
+        markers: ["risk"],
+        source_ref: { kind: "conversation", ref: "pi-session://session-atomic", turn_id: "leaf-atomic" },
+        source_excerpt: "atomic risk",
+        source_excerpt_sha256: "6".repeat(64),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  const bound = memory.captureAndResolvePending(
+    [candId],
+    {
+      type: "risk",
+      title: "Bound risk",
+      summary: "Bound summary",
+      rationale: "Bound rationale",
+      next_action: "Bound next",
+      source_refs: [
+        { kind: "conversation", ref: "pi-session://session-atomic", turn_id: "leaf-atomic" },
+      ],
+    },
+    "atomic-call-1",
+  );
+  assert.equal(bound.receipt.status, "created");
+  assert.equal(bound.resolved.length, 1);
+  assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 0);
+  // Add a SECOND unresolved idea candidate to the same store, then request a
+  // mixed-type bind: must be rejected up front (both remain unresolved).
+  const otherCand = `cand_${`7`.repeat(32)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`8`.repeat(32)}`,
+    project_id: "fixture",
+    session_id: "session-mix",
+    source_leaf_id: "leaf-mix",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: otherCand,
+        type: "idea",
+        markers: ["idea"],
+        source_ref: { kind: "conversation", ref: "pi-session://session-mix", turn_id: "leaf-mix" },
+        source_excerpt: "mixed idea",
+        source_excerpt_sha256: "9".repeat(64),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // candId is already resolved from the first bind, so a mixed request using it
+  // would hit NOT_FOUND — instead use two fresh unresolved candidates.
+  const freshRisk = `cand_${`a`.repeat(32)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`b`.repeat(32)}`,
+    project_id: "fixture",
+    session_id: "session-mix2",
+    source_leaf_id: "leaf-mix2",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: freshRisk,
+        type: "risk",
+        markers: ["risk"],
+        source_ref: { kind: "conversation", ref: "pi-session://session-mix2", turn_id: "leaf-mix2" },
+        source_excerpt: "mixed risk",
+        source_excerpt_sha256: "c".repeat(64),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  expectCode(
+    () =>
+      memory.captureAndResolvePending(
+        [freshRisk, otherCand],
+        {
+          type: "risk",
+          title: "Mixed",
+          summary: "Mixed summary",
+          rationale: "Mixed rationale",
+          next_action: "Mixed next",
+          source_refs: [{ kind: "conversation", ref: "pi-session://session-mix2", turn_id: "leaf-mix2" }],
+        },
+        "atomic-call-2",
+      ),
+    "INVALID_INPUT",
+  );
+  assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 2);
+});
+
+test("stripped required review fields are quarantined (no silent clear default)", () => {
+  const { memory } = fixture();
+  const captured = memory.capture(input("risk", "stripped-review"));
+  const file = memory.read(captured.id)!;
+  const raw = JSON.parse(JSON.stringify(file.note)) as Record<string, unknown>;
+  delete raw.review_status;
+  delete raw.review_reason;
+  writeNoteFile(file.file, raw as never, file.body);
+  assert.equal(memory.read(captured.id), null);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "SCHEMA" && /review_status/.test(issue.message)));
+});
+
+test("tampered fingerprint is quarantined and cannot redirect a later merges", () => {
+  const { cwd, memory } = fixture();
+  const a = memory.capture(input("risk", "tamper-fp"));
+  const file = memory.read(a.id)!;
+  // Replace fingerprint with a syntactically valid but content-wrong hash.
+  file.note.fingerprint = `sha256:${"a".repeat(64)}`;
+  writeNoteFile(file.file, file.note, file.body);
+  assert.equal(memory.read(a.id), null);
+  // A NEW capture of the SAME logical content must NOT merge into the
+  // quarantined note — it should create a fresh one (or fail fresh-create).
+  const fresh = memory.capture(input("risk", "tamper-fp"));
+  assert.equal(fresh.status, "created");
+  assert.notEqual(fresh.note.id, a.id);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "FINGERPRINT_MISMATCH"));
+});
+
+test("duplicate note IDs are quarantined from search/trigger/index", () => {
+  const { cwd, memory } = fixture();
+  const a = memory.capture(input("risk", "dup-id-a"));
+  // Create a second file that claims the SAME id (a's) inside the risks dir.
+  const dir = path.join(cwd, ".project-memory", "notes", "risks");
+  const dupeFile = path.join(dir, `${a.id}-dupe.md`);
+  const dupeNote = structuredClone(memory.read(a.id)!.note);
+  dupeNote.title = "Dupe identity";
+  dupeNote.summary = "Dupe summary";
+  dupeNote.rationale = "Dupe rationale";
+  dupeNote.next_action = "Dupe next";
+  dupeNote.fingerprint = fingerprintOf("risk", dupeNote.title, dupeNote.summary);
+  fs.writeFileSync(dupeFile, serializeNote(dupeNote, ""));
+  // Both files now claim a.id -> scan must quarantine the WHOLE group.
+  const scan = memory.scan();
+  assert.equal(scan.notes.filter((entry) => entry.note.id === a.id).length, 0, "duplicate identity must not be trusted");
+  expectCode(() => memory.read(a.id), "INCONSISTENT");
+  const search = memory.search({ includeTerminal: true }).filter((hit) => hit.note.id === a.id);
+  assert.equal(search.length, 0);
+  const triggers = memory.evaluateTriggers(memory.loadCanonicalState()!).due;
+  assert.equal(triggers.some((item) => item.id === a.id), false);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "DUPLICATE_ID"));
+});
+
+test("secrets hidden in object keys are detected", () => {
+  // Use a test-only custom pattern so the fixture key never resembles a real
+  // credential (avoids tripping secret scanners on the test file itself).
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pm-secret-key-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "secret-key", extra_secret_patterns: ["FIXTURE_SECRET_[0-9a-f]{16}"] });
+  const captured = memory.capture(input("idea", "secret-key"));
+  const file = memory.read(captured.id)!;
+  const raw = JSON.parse(JSON.stringify(file.note)) as Record<string, unknown>;
+  raw["FIXTURE_SECRET_0123456789abcdef"] = "value";
+  writeNoteFile(file.file, raw as never, file.body);
+  assert.equal(memory.read(captured.id), null);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "SECRET_POLICY"));
+});
+
+test("update() cannot enter a terminal status without a reason and cannot reopen", () => {
+  const { memory } = fixture();
+  const note = memory.capture(input("risk", "terminal-bypass"));
+  expectCode(
+    () => memory.update(note.id, { status: "closed" }),
+    "INVALID_INPUT",
+  );
+  // close() still works with a reason.
+  const closed = memory.close(note.id, { status: "closed", status_reason: "resolved in review" });
+  assert.equal(closed.note.status, "closed");
+  expectCode(
+    () => memory.update(note.id, { status: "open" }),
+    "INVALID_INPUT",
+  );
+});
+
+test("dangerous or invalid custom secret patterns fail closed at config load", () => {
+  // (a+)+ nested quantifier => ReDoS risk => INCONSISTENT at config parse.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pm-regex-"));
+  const memory = new ProjectMemory(cwd);
+  expectCode(
+    () => memory.init({ project_id: "regex-test", extra_secret_patterns: ["(a+)+$"] }),
+    "INCONSISTENT",
+  );
+  // Malformed pattern (unclosed group) also fails at init.
+  const cwd2 = fs.mkdtempSync(path.join(os.tmpdir(), "pm-regex2-"));
+  const memory2 = new ProjectMemory(cwd2);
+  expectCode(
+    () => memory2.init({ project_id: "regex-test2", extra_secret_patterns: ["(("] }),
+    "INCONSISTENT",
   );
 });

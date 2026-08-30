@@ -209,6 +209,30 @@ export interface ConfigFile {
 
 export const PROJECT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
+/**
+ * Fail-closed guard for custom secret regexes: invalid patterns, nested
+ * quantifiers (ReDoS) or pathological length must never silently disable a
+ * rule the project relies on. Throws INCONSISTENT at config load/init.
+ */
+export function assertSafeSecretPattern(src: string, label: string): void {
+  if (typeof src !== 'string' || src.trim() === '')
+    throw new ProjectMemoryError('INCONSISTENT', `${label} must be a non-empty string`)
+  if (src.length > 512)
+    throw new ProjectMemoryError('INCONSISTENT', `${label} exceeds 512 chars`)
+  try {
+    new RegExp(src)
+  } catch {
+    throw new ProjectMemoryError('INCONSISTENT', `${label} is not a valid regular expression`)
+  }
+  // Nested-quantifier ReDoS shapes, e.g. (a+)+, (a+){2,}, (.*)*, [a-z]+{2}:
+  // a quantifier token directly followed (optionally across a closing paren/
+  // bracket) by another quantifier. Plain a+ / (a|b)+ are fine.
+  const hasNestedQuantifier =
+    new RegExp('(?:[+*]|\\{\\d+(?:,\\d*)?\\})\\s*[)\\] ]?\\s*(?:[+*]|\\{\\d+(?:,\\d*)?\\})').test(src)
+  if (hasNestedQuantifier)
+    throw new ProjectMemoryError('INCONSISTENT', `${label} contains nested quantifiers (ReDoS risk)`)
+}
+
 export function readConfig(cwd: string): ConfigFile {
   assertProjectDir(cwd)
   assertMemoryRootSafe(cwd)
@@ -246,7 +270,10 @@ export function readConfig(cwd: string): ConfigFile {
     project_id: c.project_id,
     created_at: typeof c.created_at === 'string' ? c.created_at : '',
     extra_secret_patterns: Array.isArray(c.extra_secret_patterns)
-      ? c.extra_secret_patterns.filter((v): v is string => typeof v === 'string')
+      ? c.extra_secret_patterns.filter((v): v is string => {
+          assertSafeSecretPattern(v, 'extra_secret_patterns')
+          return true
+        })
       : undefined,
     canonical_state_file:
       typeof c.canonical_state_file === 'string' && c.canonical_state_file !== ''
@@ -299,6 +326,8 @@ export function initProjectStorage(
     const rel = assertProjectRelativePath(cwd, opts.canonical_state_file, 'canonical_state_file')
     rejectSymlinkComponents(cwd, path.join(cwd, rel), 'canonical_state_file')
   }
+  for (const pattern of opts.extra_secret_patterns ?? [])
+    assertSafeSecretPattern(pattern, 'extra_secret_patterns')
   ensureMemoryDirs(cwd)
   const file = configPath(cwd)
   if (fs.existsSync(file)) {

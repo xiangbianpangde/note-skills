@@ -71,6 +71,7 @@ import type {
 import {
   assertProjectDir,
   assertProjectRelativePath,
+  assertSafeSecretPattern,
   rejectSymlinkComponents,
   readConfig,
   initProjectStorage,
@@ -134,11 +135,10 @@ export const DEFAULT_SECRET_RULES: readonly SecretRule[] = [
 export function secretRulesFor(cfg: ConfigFile): readonly SecretRule[] {
   const extra: SecretRule[] = []
   for (const src of cfg.extra_secret_patterns ?? []) {
-    try {
-      extra.push({ name: `extra:${src.slice(0, 32)}`, re: new RegExp(src) })
-    } catch {
-      /* ignore malformed extra patterns (config-level issue, surfaced in reconcile) */
-    }
+    // Fail closed: a malformed/dangerous custom pattern must NOT silently
+    // disable a rule the project relies on.
+    assertSafeSecretPattern(src, 'extra_secret_patterns')
+    extra.push({ name: `extra:${src.slice(0, 32)}`, re: new RegExp(src) })
   }
   return [...DEFAULT_SECRET_RULES, ...extra]
 }
@@ -186,6 +186,15 @@ export function findSecretMatches(
       return
     }
     for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
+      // Scan keys too: with additionalProperties tolerated by the schema, a
+      // secret can be smuggled into a field NAME (e.g. gh_xxx: value).
+      if (typeof key === 'string' && key !== '') {
+        for (const rule of rules) {
+          rule.re.lastIndex = 0
+          if (rule.re.test(key)) hits.push({ rule: rule.name, path: `${at}.<key>` })
+          rule.re.lastIndex = 0
+        }
+      }
       visit(item, `${at}[${JSON.stringify(key)}]`)
     }
   }
@@ -279,13 +288,18 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
   if (note.sensitivity !== undefined && !SENSITIVITIES.includes(note.sensitivity))
     bad('sensitivity', `must be one of ${SENSITIVITIES.join(', ')}`)
   if (!REVIEW_STATUSES.includes(note.review_status))
-    bad('review_status', `must be one of ${REVIEW_STATUSES.join(', ')}`)
+    bad('review_status', `must be one of ${REVIEW_STATUSES.join(', ')} (missing required field is rejected — no defaulting)`)
   if (
     note.review_status === 'needs_review' &&
-    (typeof note.review_reason !== 'string' || note.review_reason.trim() === '')
+    (typeof note.review_reason !== 'string' || note.review_reason.trim() === '') &&
+    note.review_reason !== undefined
   ) bad('review_reason', 'needs_review requires a non-empty review_reason')
-  if (note.review_status === 'clear' && note.review_reason !== null)
+  if (note.review_status === 'needs_review' && note.review_reason === undefined)
+    bad('review_reason', 'required for needs_review but missing from note')
+  if (note.review_status === 'clear' && note.review_reason !== null && note.review_reason !== undefined)
     bad('review_reason', 'must be null while review_status is clear')
+  if (note.review_status === 'clear' && note.review_reason === undefined)
+    bad('review_reason', 'required (null) while review_status is clear but missing from note')
 
   if (!Array.isArray(note.source_refs) || note.source_refs.length === 0)
     bad('source_refs', 'at least one source_ref is required (invariant 3)')
@@ -945,10 +959,32 @@ export class ProjectMemory {
         })
         continue
       }
+      // Derived invariant: fingerprint must equal fingerprintOf(type,title,summary).
+      // A tampered fingerprint could otherwise redirect dedupe merges into the
+      // wrong note; quarantine it instead of trusting the persisted value.
+      const expectedFingerprint = fingerprintOf(hyd.note.type, hyd.note.title, hyd.note.summary)
+      if (hyd.note.fingerprint !== expectedFingerprint) {
+        errors.push({
+          file: raw.file,
+          message: `fingerprint does not match its content (note claims ${hyd.note.fingerprint.slice(0, 20)}…, computed ${expectedFingerprint.slice(0, 20)}…)`,
+        })
+        continue
+      }
       const prev = seen.get(hyd.note.id)
       if (prev) duplicates.push(`${hyd.note.id} (${prev} and ${raw.file})`)
       seen.set(hyd.note.id, raw.file)
       notes.push(hyd)
+    }
+    // Duplicate identity: a logical ID with more than one trustable file is
+    // ambiguous; quarantine the WHOLE group so search/triggers/index never
+    // consume an uncertain revision.
+    if (duplicates.length > 0) {
+      const dupIds = new Set(duplicates.map((entry) => entry.split(' ')[0] ?? ''))
+      const quarantined = notes.filter((entry) => dupIds.has(entry.note.id))
+      for (const entry of quarantined) {
+        errors.push({ file: entry.file, message: `duplicate note id ${entry.note.id} — quarantined from trusted operations` })
+      }
+      notes.splice(0, notes.length, ...notes.filter((entry) => !dupIds.has(entry.note.id)))
     }
     return { notes, errors, duplicates }
   }
@@ -1076,6 +1112,20 @@ export class ProjectMemory {
           throw new ProjectMemoryError(
             'INVALID_INPUT',
             `illegal status "${patch.status}" for type ${note.type} (legal: ${STATUSES[note.type].join(', ')})`,
+          )
+        // Provenance rule: entering a terminal status requires an explicit
+        // non-empty reason. close() forces this; update() must not bypass it.
+        const targetIsTerminal = isTerminal(note.type, patch.status)
+        if (targetIsTerminal && (patch.status_reason === undefined || patch.status_reason.trim() === ''))
+          throw new ProjectMemoryError(
+            'INVALID_INPUT',
+            `update to terminal status "${patch.status}" requires a non-empty status_reason (use close() for terminal transitions)`,
+          )
+        // Terminal -> non-terminal reopen is not allowed through update().
+        if (!targetIsTerminal && isTerminal(note.type, note.status))
+          throw new ProjectMemoryError(
+            'INVALID_INPUT',
+            `cannot reopen terminal note ${id} (current ${note.status}) via update()`,
           )
         note.status = patch.status
       }
@@ -1763,6 +1813,18 @@ export class ProjectMemory {
       const mutations: Array<{ envelope: PendingCaptureEnvelope; file: string }> = []
       const resolved: PendingCaptureCandidate[] = []
       const at = new Date().toISOString()
+
+      // Captured resolutions must bind to a REAL, this-project Note whose type
+      // matches every candidate it claims. A candidate cannot be settled by an
+      // unrelated or nonexistent note (P1: pending gate false settlement).
+      let boundNote: { id: string; type: NoteType; source_refs: SourceRef[] } | null = null
+      if (resolution.status === 'captured' && resolution.note_id) {
+        const foundNote = this.read(resolution.note_id)
+        if (!foundNote)
+          throw new ProjectMemoryError('NOT_FOUND', `captured resolution references nonexistent note ${resolution.note_id}`)
+        boundNote = { id: foundNote.note.id, type: foundNote.note.type, source_refs: foundNote.note.source_refs }
+      }
+
       for (const envelope of envelopes) {
         let changed = false
         for (const candidate of envelope.candidates) {
@@ -1777,6 +1839,21 @@ export class ProjectMemory {
               continue
             }
             throw new ProjectMemoryError('CONFLICT', `candidate ${candidate.candidate_id} is already resolved`)
+          }
+          if (boundNote) {
+            if (candidate.type !== boundNote.type)
+              throw new ProjectMemoryError(
+                'INVALID_INPUT',
+                `candidate ${candidate.candidate_id} (type ${candidate.type}) cannot be settled by note ${boundNote.id} (type ${boundNote.type})`,
+              )
+            const candidateRef = [candidate.source_ref.kind, candidate.source_ref.ref, candidate.source_ref.turn_id ?? ''].join('\u0000')
+            const noteRefs = boundNote.source_refs.map((source) => sourceKey(source))
+            if (!noteRefs.includes(candidateRef)) {
+              throw new ProjectMemoryError(
+                'INVALID_INPUT',
+                `candidate ${candidate.candidate_id} provenance (${candidateRef}) is not referenced by note ${boundNote.id} — capture the candidate's source with the note or skip it`,
+              )
+            }
           }
           candidate.resolution = { ...resolution, resolved_at: at }
           changed = true
@@ -1799,6 +1876,70 @@ export class ProjectMemory {
       return resolved
     } finally {
       releaseLockFile(lockPath, lockFd)
+    }
+  }
+
+  /**
+   * Atomic capture-and-resolve for the Mandatory Capture Gate: the Note is
+   * created (or merged) inside the fingerprint lock, then the candidate
+   * resolution is bound to it in the SAME tool call with a verifiable link.
+   *
+   * Binding rules (in the pending lock):
+   *   - each candidate must exist and be unresolved;
+   *   - every candidate type must match the captured Note type (one Note may
+   *     resolve several candidates only when they share the same type);
+   *   - each candidate's source_ref (session URI + turn) must appear in the
+   *     Note's source_refs unless a skip resolution is used.
+   * Returns the capture receipt plus the resolved candidates.
+   */
+  captureAndResolvePending(
+    candidateIds: string[],
+    input: CaptureInput,
+    toolCallId: string,
+  ): { receipt: CaptureReceipt; resolved: PendingCaptureCandidate[] } {
+    const ids = [...new Set(candidateIds)]
+    if (ids.length === 0 || ids.some((id) => !PENDING_CANDIDATE_ID_RE.test(id)))
+      throw new ProjectMemoryError('INVALID_INPUT', 'candidate_ids must contain at least one valid pending candidate ID')
+    if (!toolCallId.trim())
+      throw new ProjectMemoryError('INVALID_INPUT', 'captureAndResolvePending requires the real tool_call_id')
+
+    // Pre-validate candidate types (affects dedupe semantics) BEFORE capture.
+    const candidates = this.pendingCaptureCandidates()
+    const byId = new Map(candidates.map((candidate) => [candidate.candidate_id, candidate]))
+    const missingIds = ids.filter((id) => !byId.has(id))
+    if (missingIds.length)
+      throw new ProjectMemoryError('NOT_FOUND', `pending candidates not found: ${missingIds.join(', ')}`)
+    const expectedTypes = new Set(ids.map((id) => byId.get(id)!.type))
+    if (expectedTypes.size > 1)
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        `captureAndResolvePending requires candidates of one type; got ${[...expectedTypes].join(', ')}`,
+      )
+    if (!expectedTypes.has(input.type))
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        `captureAndResolvePending candidate type ${[...expectedTypes][0]} does not match capture type ${input.type}`,
+      )
+
+    // Capture first (creates/merges a Note inside the fingerprint lock).
+    const receipt = this.capture(input)
+    try {
+      // Then bind the resolution under the pending lock. The candidate type
+      // check above guarantees the Note type matches; verify existence and
+      // identity again inside the lock.
+      const resolved = this.resolvePendingCapture(ids, {
+        status: 'captured',
+        tool_call_id: toolCallId,
+        note_id: receipt.id,
+      })
+      return { receipt, resolved }
+    } catch (error) {
+      // The Note is already durable; do NOT pretend the whole call failed.
+      throw new ProjectMemoryError(
+        'INCONSISTENT',
+        `capture committed (${receipt.id}) but candidate resolution failed: ${error instanceof Error ? error.message : String(error)} — run project_memory capture again with the same candidate_ids and source to bind them`,
+        { note_id: receipt.id, candidate_ids: ids, cause: error instanceof Error ? error.message : String(error) },
+      )
     }
   }
 
@@ -1875,6 +2016,18 @@ export class ProjectMemory {
           noteId: hyd.note.id,
           file: raw.file,
           message: `secret-bearing note quarantined at ${secretHits.map((hit) => `${hit.rule}@${hit.path}`).join(', ')}`,
+        })
+        continue
+      }
+      // Derived invariant mirror of scan(): fingerprint must bind content.
+      const expectedFingerprint = fingerprintOf(hyd.note.type, hyd.note.title, hyd.note.summary)
+      if (hyd.note.fingerprint !== expectedFingerprint) {
+        issues.push({
+          severity: 'error',
+          code: 'FINGERPRINT_MISMATCH',
+          noteId: hyd.note.id,
+          file: raw.file,
+          message: `fingerprint does not match its content (${hyd.note.fingerprint.slice(0, 20)}… !== ${expectedFingerprint.slice(0, 20)}…)`,
         })
         continue
       }
@@ -2257,25 +2410,25 @@ function hydrateNote(raw: ScannedRaw): ScannedNote | null {
       authority: o.authority as Note['authority'],
       confidence: o.confidence as Confidence | undefined,
       sensitivity: o.sensitivity as Sensitivity | undefined,
-      review_status: o.review_status === undefined ? 'clear' : (o.review_status as ReviewStatus),
-      review_reason:
-        o.review_reason === undefined
-          ? null
-          : (o.review_reason as Note['review_reason']),
+      // Required fields are NOT defaulted: a stripped review_status stays
+      // undefined so validateNote() reports it as missing (fail-closed)
+      // instead of silently reverting an edited note to 'clear'.
+      review_status: o.review_status as ReviewStatus | undefined,
+      review_reason: o.review_reason as string | null | undefined,
       tags: o.tags as string[],
       source_refs: o.source_refs as SourceRef[],
       related_files: o.related_files as RelatedFile[],
       relations: o.relations as Relations,
       trigger: o.trigger as Trigger | null,
-      no_trigger_reason: typeof o.no_trigger_reason === 'string' ? o.no_trigger_reason : null,
+      no_trigger_reason: o.no_trigger_reason as string | null | undefined,
       next_action: typeof o.next_action === 'string' ? o.next_action : '',
-      status_reason: typeof o.status_reason === 'string' ? o.status_reason : null,
-      acceptance_evidence: typeof o.acceptance_evidence === 'string' ? o.acceptance_evidence : null,
+      status_reason: o.status_reason as string | null | undefined,
+      acceptance_evidence: o.acceptance_evidence as string | null | undefined,
       created_by: o.created_by as Note['created_by'],
       created_at: typeof o.created_at === 'string' ? o.created_at : '',
       updated_at: typeof o.updated_at === 'string' ? o.updated_at : '',
       promotion: o.promotion as Note['promotion'],
-    }
+    } as Note
     return { note, file: raw.file, body: raw.body, sha256: raw.sha256 }
   } catch {
     return null

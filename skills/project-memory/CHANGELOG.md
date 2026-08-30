@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 - 2026-08-30
+
+- Candidate settlement is bound: capture with `candidate_ids` validates type match and that the note's source_refs reference the candidate provenance; unrelated or fabricated notes cannot settle a candidate.
+- Removing the run-wide suppression: every `agent_end` scans for new signals; per-candidate dedup by type/markers/source leaf/excerpt hash only.
+- Harness provenance (pi-session:// server+leaf) is always the authoritative first source; model-supplied sources are additional claims only.
+- Direct `update()` to terminal status requires a `status_reason` and cannot reopen closed notes; use `close()`.
+- Trusted scan quarantines stripped required review fields, tampered fingerprints, duplicate-ID groups, secret keys, and invalid custom secret regexes.
+
 ## 0.2.4 - 2026-08-30
 
 - `objectId/version` (and target ref) are validated as strings and bound into approval + capability comparison; non-string values are rejected before any canonical write.

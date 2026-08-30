@@ -177,19 +177,34 @@ function trustedTriggerState(memory: ProjectMemory): TriggerState | undefined {
   return memory.loadCanonicalState() ?? undefined;
 }
 
-function sourceRef(ctx: ExtensionContext, params: {
+/**
+ * Harness-bound provenance: the real Pi session+leaf are ALWAYS the first
+ * (authoritative) source and can never be replaced by model-supplied fields.
+ * Any model-supplied source_ref/source_kind/source_turn_id is appended as an
+ * ADDITIONAL claimed/unverified source, never substituted for the real one.
+ */
+function sourceRefs(ctx: ExtensionContext, params: {
   source_ref?: string;
   source_kind?: "conversation" | "event" | "file" | "commit" | "issue" | "manual" | "other";
   source_turn_id?: string;
-}) {
+}): Array<{ kind: "conversation" | "event" | "file" | "commit" | "issue" | "manual" | "other"; ref: string; turn_id?: string; observed_at: string }> {
   const sessionId = ctx.sessionManager.getSessionId();
   const leaf = ctx.sessionManager.getLeafId() ?? "unpersisted";
-  return {
-    kind: params.source_kind ?? ("conversation" as const),
-    ref: params.source_ref ?? `pi-session://${sessionId}`,
-    turn_id: params.source_turn_id ?? leaf,
+  const authoritative = {
+    kind: "conversation" as const,
+    ref: `pi-session://${sessionId}`,
+    turn_id: leaf,
     observed_at: new Date().toISOString(),
   };
+  const claimed = params.source_ref
+    ? [{
+        kind: params.source_kind ?? ("manual" as const),
+        ref: params.source_ref,
+        ...(params.source_turn_id ? { turn_id: params.source_turn_id } : {}),
+        observed_at: new Date().toISOString(),
+      }]
+    : [];
+  return [authoritative, ...claimed];
 }
 
 function hitEnvelope(hit: SearchHit, relevanceReason: string[]) {
@@ -336,7 +351,6 @@ function compactResult(value: unknown): string {
 }
 
 export default function projectMemoryExtension(pi: ExtensionAPI) {
-  let handledThisRun = false;
   let pendingCandidates: PendingCaptureCandidate[] = [];
   let captureFollowUpActive = false;
   let compactionBlocks = 0;
@@ -405,21 +419,23 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
             status: params.status,
             priority: params.priority,
             tags: params.tags,
-            source_refs: [sourceRef(ctx, params)],
+            source_refs: sourceRefs(ctx, params),
             trigger: trigger ?? null,
             no_trigger_reason: params.no_trigger_reason ?? null,
             next_action: requireString(params.next_action, "next_action"),
             acceptance_evidence: params.acceptance_evidence ?? null,
             created_by: { kind: "agent", id: ctx.model?.id ?? "unknown-model" },
           };
-          const receipt = memory.capture(input);
-          const resolved = params.candidate_ids?.length
-            ? memory.resolvePendingCapture(params.candidate_ids, {
-                status: "captured",
-                tool_call_id: toolCallId,
-                note_id: receipt.id,
-              })
-            : [];
+          // With candidate_ids, use the atomic Core primitive so the Note and
+          // the candidate bindings are validated in one call (type match +
+          // provenance reference). Without candidate_ids, plain capture.
+          const bound = params.candidate_ids?.length
+            ? memory.captureAndResolvePending(params.candidate_ids, input, toolCallId)
+            : null;
+          const receipt =
+            bound?.receipt ??
+            memory.capture(input);
+          const resolved = bound?.resolved ?? [];
           result = { ...receipt, resolved_candidates: resolved.map((candidate) => candidate.candidate_id) };
           pi.appendEntry("project-memory-receipt", {
             gate: "capture",
@@ -430,7 +446,6 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
             candidate_ids: resolved.map((candidate) => candidate.candidate_id),
             at: new Date().toISOString(),
           });
-          handledThisRun = true;
           refreshPending(memory);
           break;
         }
@@ -457,7 +472,6 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           const patch = parseJson<UpdatePatch>(params.patch_json, "patch_json");
           if (!patch) throw new ProjectMemoryError("INVALID_INPUT", "patch_json is required");
           result = memory.update(requireString(params.id, "id"), patch);
-          handledThisRun = true;
           break;
         }
         case "close": {
@@ -465,7 +479,6 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
             status: requireString(params.status, "status"),
             status_reason: requireString(params.status_reason, "status_reason"),
           });
-          handledThisRun = true;
           break;
         }
         case "promote": {
@@ -520,7 +533,6 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
             mode,
             at: new Date().toISOString(),
           });
-          handledThisRun = true;
           break;
         }
         case "reconcile": {
@@ -545,7 +557,6 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           };
           pi.appendEntry("project-memory-receipt", receipt);
           result = receipt;
-          handledThisRun = true;
           refreshPending(memory);
           break;
         }
@@ -598,22 +609,38 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 
   pi.on("agent_settled", () => {
     // Reset only after all tool continuations, retries, compaction, and queued
-    // follow-ups finish. Earlier lifecycle events can repeat within one run.
-    handledThisRun = false;
+    // follow-ups finish.
+    captureFollowUpActive = false;
   });
 
   pi.on("agent_end", (event, ctx) => {
     if (!hasConfig(ctx.cwd)) return;
-    if (captureFollowUpActive) {
-      captureFollowUpActive = false;
-      return;
-    }
-    if (handledThisRun) return;
     const sourceText = messageText(event.messages);
     const signals = detectCaptureSignals(sourceText);
     if (signals.length === 0) return;
     const memory = new ProjectMemory(ctx.cwd);
-    const envelope = memory.persistPendingCapture(pendingEnvelope(memory, ctx, signals, sourceText));
+    // Deduplicate against candidates ALREADY persisted in this conversation
+    // (resolved OR still pending) by (type, markers, source leaf, excerpt
+    // hash). A successful capture never suppresses NEW signals that appear
+    // later in the same run — only the exact captured signals are considered
+    // handled. Persisted-but-unresolved candidates also stay handled so the
+    // follow-up gate message is not re-sent every agent_end.
+    const seen = new Set(
+      memory
+        .pendingCaptureEnvelopes()
+        .flatMap((envelope) => envelope.candidates)
+        .map((candidate) =>
+          [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.source_excerpt_sha256].join("\u0000"),
+        ),
+    );
+    const freshSignals = signals.filter((signal) => {
+      const probe = pendingEnvelope(memory, ctx, [signal], sourceText);
+      const candidate = probe.candidates[0]!;
+      const key = [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.source_excerpt_sha256].join("\u0000");
+      return !seen.has(key);
+    });
+    if (freshSignals.length === 0) return;
+    const envelope = memory.persistPendingCapture(pendingEnvelope(memory, ctx, freshSignals, sourceText));
     pendingCandidates = refreshPending(memory);
     captureFollowUpActive = true;
     pi.appendEntry("project-memory-pending-capture", {
