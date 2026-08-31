@@ -372,27 +372,78 @@ function pendingEnvelope(
 }
 
 function messageText(messages: unknown[]): string {
-  return messageBlocks(messages).join("\n");
+  return messageBlocks(messages)
+    .map((block) => block.content)
+    .join("\n");
+}
+
+interface MessageBlock {
+  role: "user" | "assistant";
+  content: string;
 }
 
 /** Per-message text blocks: each user/assistant message is one block. */
-function messageBlocks(messages: unknown[]): string[] {
-  const parts: string[] = [];
+function messageBlocks(messages: unknown[]): MessageBlock[] {
+  const parts: MessageBlock[] = [];
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
     const record = message as { role?: string; content?: unknown };
     if (record.role !== "user" && record.role !== "assistant") continue;
-    if (typeof record.content === "string") parts.push(record.content);
+    if (typeof record.content === "string") parts.push({ role: record.role, content: record.content });
     if (Array.isArray(record.content)) {
       for (const block of record.content) {
         if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
           const text = (block as { text?: unknown }).text;
-          if (typeof text === "string") parts.push(text);
+          if (typeof text === "string") parts.push({ role: record.role, content: text });
         }
       }
     }
   }
   return parts;
+}
+
+/**
+ * Gate-noise suppression for the agent_end capture scan (§cycle fix).
+ *
+ * Three kinds of text must not generate candidates:
+ *  1. The Gate message itself (it explains the gate and quotes pending IDs);
+ *  2. Assistant replies that ONLY talk about handling the gate ("已 acknowledge…
+ *     待决项清零", "I skipped…", receipt bookkeeping) — these are meta-discourse
+ *     about the capture process, not new durable semantics (the reported
+ *     same-source infinite loop);
+ *  3. User/assistant messages that merely quote gate vocabulary without
+ *     carrying independent semantics.
+ *
+ * Real content ("合同冻结", "实现完成", actual milestones) is preserved
+ * even inside an assistant gate-handling reply, because suppression only
+ * triggers when the block is dominated by meta-discourse.
+ */
+function isGateMetaDiscourse(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return true;
+  // 1) The gate announcement itself.
+  if (trimmed.startsWith("[Note Skills Mandatory Capture Gate]")) return true;
+  // 2) Meta-discourse about handling the gate: report lines, not semantics.
+  const metaFreq = (trimmed.match(
+    /已\s*acknowledge|待决项|候选|捕获|清理|settled|skip(?:ped)?\s*[:：]?|receipt|门禁|清零|candidate|acknowledge|semantic gate|pending capture|待解决|注：|备注：/gi,
+  ) ?? []).length;
+  // If the block is short and majority gate-vocabulary, treat as meta.
+  const words = trimmed.split(/\s+/).length;
+  if (words <= 40 && metaFreq >= 2) return true;
+  // 3) Pure bookkeeping shapes like "已 acknowledge（skipped @...）待决项清零"
+  if (/^[^\n]*已\s*acknowledge/.test(trimmed) && /待决项|候选/.test(trimmed)) return true;
+  return false;
+}
+
+/** Blocks that are eligible for capture-signal scanning. */
+function captureEligibleBlocks(blocks: MessageBlock[]): { index: number; block: MessageBlock }[] {
+  const out: { index: number; block: MessageBlock }[] = [];
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index]!;
+    if (isGateMetaDiscourse(block.content)) continue;
+    out.push({ index, block });
+  }
+  return out;
 }
 
 function compactResult(value: unknown): string {
@@ -666,13 +717,26 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
   pi.on("agent_end", (event, ctx) => {
     if (!hasConfig(ctx.cwd)) return;
     const blocks = messageBlocks(event.messages);
-    const sourceText = blocks.join("\n");
-    // Per-block detection: each message contributes its own candidates, so two
-    // DISTINCT durable units of the same type (risk A then risk B) each get a
-    // candidate instead of one aggregated type signal.
-    const signals = detectCaptureSignalsInBlocks(blocks);
-    if (signals.length === 0) return;
+    // Gate-noise suppression (§cycle fix): exclude the gate message itself,
+    // assistant meta-discourse about handling the gate, and user messages that
+    // only quote gate vocabulary. This kills the same-source infinite loop
+    // where each acknowledge reply re-captured itself as new candidates.
+    const eligible = captureEligibleBlocks(blocks);
+    const sourceText = blocks.map((block) => block.content).join("\n");
+    if (eligible.length === 0) return;
     const memory = new ProjectMemory(ctx.cwd);
+    // Detect per eligible block, pairing each signal with its TRUE block index
+    // (filtered-out blocks keep their index, so span keys remain stable).
+    const blockSignals = eligible.flatMap((entry) =>
+      detectCaptureSignalsInBlocks([entry.block.content]).map((signal) => ({
+        ...signal,
+        // spanKey = trueBlockIndex \u0000 markerOffset \u0000 blockContentHash —
+        // occurrence identity that stays distinct across different texts and
+        // occurrences, while re-scanning the SAME span stays idempotent.
+        spanKey: `${entry.index}\u0000${signal.spanKey?.split("\u0000")[1] ?? 0}\u0000${sha256hex(entry.block.content).slice(0, 16)}`,
+      })),
+    );
+    if (blockSignals.length === 0) return;
     // Deduplicate against candidates ALREADY persisted by (envelope span hash,
     // type, markers, source leaf, excerpt hash). Distinct spans stay distinct;
     // re-scanning the exact same span stays idempotent; a NEW signal later in
@@ -685,17 +749,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.candidate_id].join("\u0000"),
         ),
     );
-    const blockSignals = blocks.flatMap((block, index) =>
-      detectCaptureSignalsInBlocks([block]).map((signal) => ({
-        ...signal,
-        // spanKey = blockIndex \u0000 markerOffset \u0000 blockContentHash —
-        // occurrence identity that stays distinct across different texts and
-        // occurrences, while re-scanning the SAME span stays idempotent.
-        spanKey: `${index}\u0000${signal.spanKey?.split("\u0000")[1] ?? 0}\u0000${sha256hex(block).slice(0, 16)}`,
-      })),
-    );
     const freshSignals = blockSignals.filter((signal) => {
-      const spanText = blocks[Number(signal.spanKey.split("\u0000")[0])] ?? sourceText;
+      const spanText = blocks[Number(signal.spanKey.split("\u0000")[0])]?.content ?? sourceText;
       const probe = pendingEnvelope(memory, ctx, [signal], spanText, signal.spanKey);
       const candidate = probe.candidates[0]!;
       const key = [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.candidate_id].join("\u0000");
@@ -712,7 +767,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
     const persisted: string[] = [];
     for (const [spanKey, signalsForSpan] of bySpan) {
       const index = Number(spanKey.split("\u0000")[0]);
-      const spanText = blocks[index] ?? sourceText;
+      const spanText = blocks[index]?.content ?? sourceText;
       const envelope = memory.persistPendingCapture(pendingEnvelope(memory, ctx, signalsForSpan, spanText, spanKey));
       persisted.push(...envelope.candidates.map((candidate) => candidate.candidate_id));
     }

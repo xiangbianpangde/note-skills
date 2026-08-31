@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 - 2026-08-31
+
+- Fix same-source capture gate infinite loop: gate-noise blocks (gate message, assistant acknowledge reports, meta-discourse) are excluded from agent_end signal detection; real semantics survive. Regression tests added (68 total).
+
 ## 0.4.0 - 2026-08-31
 
 - Brand rename: package `pi-project-memory` → `note-skills`; tool `project_memory` → `note_skills`; data dir `.project-memory` → `.note-skills`; skill dir `skills/project-memory/` → `skills/note-skills/`. No security-model/invariant change from signed v0.3.6. Breaking API change (tool name, data dir) — package not yet published, no migration cost.

@@ -25,6 +25,73 @@ test("capture signal detector ignores routine execution and untrusted external i
   );
 });
 
+test("gate meta-discourse does not self-capture (same-source loop regression)", () => {
+  // Same-source infinite loop (reported): an assistant reply that ONLY reports
+  // handling the gate must not re-capture itself as new candidates.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-loop-regression-"));
+  new ProjectMemory(cwd).init({ project_id: "loop-regression" });
+  const { events, sent } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-loop", getLeafId: () => "leaf-loop" },
+  };
+  // A discussion that is entirely gate-handling meta-discourse (the loop case):
+  // the gate message itself + assistant's acknowledge report. NO new candidates.
+  events.get("agent_end")!(
+    {
+      messages: [
+        { role: "user", content: "P1 后续再考虑插件。" },
+        { role: "assistant", content: "已 acknowledge（skipped @ 2026-08-31）待决项清零，候选已清理。" },
+      ],
+    },
+    ctx,
+  );
+  // All pending candidates must originate from the REAL user signal only.
+  // The assistant meta-reply must not add any candidate (same-source loop fix).
+  const pending = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.ok(pending.length >= 1);
+  for (const candidate of pending) {
+    assert.match(candidate.source_excerpt, /P1 后续再考虑插件/);
+    assert.doesNotMatch(candidate.source_excerpt, /已 acknowledge|待决项清零|候选已清理/);
+  }
+
+  // STRICT case: an assistant reply that ONLY reports gate handling produces
+  // ZERO candidates — the exact infinite-loop shape from the field report.
+  const cwdLoop = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-loop-strict-"));
+  new ProjectMemory(cwdLoop).init({ project_id: "loop-strict" });
+  const harnessLoop = extensionHarness();
+  const ctxLoop = { ...ctx, cwd: cwdLoop };
+  harnessLoop.events.get("agent_end")!(
+    {
+      messages: [{ role: "assistant", content: "已 acknowledge（skipped @ 2026-08-31）待决项清零，候选已清理。" }],
+    },
+    ctxLoop,
+  );
+  assert.equal(new ProjectMemory(cwdLoop).pendingCaptureCandidates().length, 0);
+
+  // Real semantics inside a gate-handling reply are NOT suppressed.
+  const cwd2 = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-loop-real-"));
+  new ProjectMemory(cwd2).init({ project_id: "loop-real" });
+  const harness2 = extensionHarness();
+  const ctx2 = { ...ctx, cwd: cwd2 };
+  harness2.events.get("agent_end")!(
+    {
+      messages: [
+        { role: "assistant", content: "我 acknowledge 了这批候选。" },
+        { role: "assistant", content: "但项目合同冻结是实现完成后的里程碑，需要后续跟进。" },
+      ],
+    },
+    ctx2,
+  );
+  const pending2 = new ProjectMemory(cwd2).pendingCaptureCandidates();
+  assert.ok(
+    pending2.some((c) => c.type === "deferred_work" && /合同冻结/.test(c.source_excerpt)),
+    "real deferred_work inside a gate-handling reply must survive",
+  );
+});
+
 function extensionHarness() {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const commands: string[] = [];

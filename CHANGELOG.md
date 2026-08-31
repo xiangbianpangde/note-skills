@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 - 2026-08-31
+
+- **Fix same-source capture gate infinite loop** (reported from researchctl project): the agent_end capture scan now suppresses gate-noise blocks before signal detection: (1) the `[Note Skills Mandatory Capture Gate]` message itself; (2) assistant replies that only report handling the gate ("已 acknowledge…待决项清零", skip/receipt bookkeeping) — these self-referential meta-discourses previously re-captured themselves as new candidates, consuming ~200 candidates in the field; (3) short blocks dominated by gate vocabulary. Real semantics inside a gate-handling reply (e.g. "合同冻结是实现完成后的里程碑") are preserved. Same-source loop regression tests: strict zero-candidate meta-reply + real-semantics-survive (68 total).
+
 ## 0.4.0 - 2026-08-31
 
 - **Rebrand to Note Skills** (breaking):
