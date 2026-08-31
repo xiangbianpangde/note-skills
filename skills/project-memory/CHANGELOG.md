@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5 - 2026-08-31
+
+- Skip receipts are written project-safely and atomically with the envelope batch (no half-settle, no symlink escape).
+- Threat model documented: pending authenticity/completeness is out of scope without an external anchor; version re-binding semantics added.
+
 ## 0.3.4 - 2026-08-31
 
 - Candidate binding requires the exact candidate id (plus source identity and excerpt hash); same-block same-type occurrences are distinct.

@@ -1812,3 +1812,77 @@ test("forged status:skipped resolution reverts to unresolved without a receipt",
   assert.equal(afterForged.length, 1, "forged skip without receipt must revert to unresolved");
   assert.equal(afterForged[0]!.candidate_id, candId2);
 });
+
+test("skip receipt writes are project-contained and batch-atomic (symlink / dir target / no half-settle)", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const mkCandidate = (id: string, session: string) => ({
+    candidate_id: id,
+    type: "risk" as const,
+    markers: ["风险"],
+    source_ref: { kind: "conversation" as const, ref: `pi-session://${session}`, turn_id: "l" },
+    source_excerpt: "skip receipt",
+    source_excerpt_sha256: `${id.slice(5, 37)}`.padEnd(64, "1"),
+    detected_at: now,
+    resolution: null,
+  });
+  const candA = `cand_${`ab`.repeat(16)}`;
+  const candB = `cand_${`cd`.repeat(16)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`34`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-receipt",
+    source_leaf_id: "l",
+    created_at: now,
+    candidates: [mkCandidate(candA, "s-receipt"), mkCandidate(candB, "s-receipt")],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  const receiptsDir = path.join(cwd, ".project-memory", "pending", ".receipts");
+
+  // Scenario A: .receipts replaced by a symlink to outside.
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pm-receipt-out-"));
+  fs.rmSync(receiptsDir, { recursive: true, force: true });
+  fs.symlinkSync(outside, receiptsDir, "dir");
+  expectCode(
+    () =>
+      memory.resolvePendingCapture([candA], {
+        status: "skipped",
+        tool_call_id: "call-a",
+        reason: "false positive",
+      }),
+    "INCONSISTENT",
+  );
+  assert.equal(fs.readdirSync(outside).length, 0, "receipt must not land outside via symlink");
+  fs.rmSync(receiptsDir, { force: true });
+
+  // Scenario B: receipt target is a directory -> whole batch fails, no half-settle.
+  fs.mkdirSync(receiptsDir, { recursive: true });
+  fs.mkdirSync(path.join(receiptsDir, `${candA}.json`), { recursive: true });
+  const isRenameFailure = (error: unknown) =>
+    (error as { code?: string }).code === "EISDIR" || (error as { code?: string }).code === "EEXIST";
+  assert.throws(
+    () =>
+      memory.resolvePendingCapture([candA], {
+        status: "skipped",
+        tool_call_id: "call-a",
+        reason: "false positive",
+      }),
+    isRenameFailure,
+  );
+  // Envelope must NOT be committed (candidate stays unresolved).
+  assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 2);
+  fs.rmSync(path.join(receiptsDir, `${candA}.json`), { recursive: true, force: true });
+
+  // Scenario C: two-candidate batch with a dir target for B -> no half-settle.
+  fs.mkdirSync(path.join(receiptsDir, `${candB}.json`), { recursive: true });
+  assert.throws(
+    () =>
+      memory.resolvePendingCapture([candA, candB], {
+        status: "skipped",
+        tool_call_id: "call-ab",
+        reason: "false positives",
+      }),
+    isRenameFailure,
+  );
+  assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 2, "batch must not half-settle");
+});

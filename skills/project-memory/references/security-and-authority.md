@@ -85,13 +85,14 @@ Canonical 当前状态（规范、代码、Issue、实验记录、被接受的�
 
 - **本地恶意并发进程的路径交换（TOCTOU）**：校验与实际 read/write 之间存在 check-then-use 窗口。若威胁模型包含"同用户下不遵守 lock 协议的恶意进程"，需要用 dirfd/O_NOFOLLOW/renameat 级原语重写路径处理；**当前版本不声称防御此类攻击**，仅防御"操作开始时已存在"的 symlink 与静态逃逸。
 - **拥有仓库写权限并直接修改源码/配置的攻击者**：本包的安全保证建立在其自身的信任代码路径上；仓库写者有能力替换任何校验逻辑。`git` 提交历史与 reviewed diff 是主要防线。
-- **`.project-memory/pending` 的候选身份不可由 JSON 自证**：候选的 `source_excerpt_sha256`/`candidate_id` 属于可编辑字段。系统对 captured 以 Note 的 source_refs（含 candidate_id + excerpt）三重绑定回验；对 skipped 以 durable skip-receipt 回验。**若攻击者可同时改写 pending JSON 与 Note/Receipt，则需仓库外可信锚点（如签名/MAC）**——当前不在威胁模型内，作为已知限制记录。
+- **`.project-memory/pending` 的身份与数量不可由 JSON 自证（有限边界）**：本设计只保证**候选身份保持不变**时对 resolution-only 修改的检测（captured 由 Note 的 source_refs 三重绑定回验；skipped 由 durable skip-receipt 回验）。**明确排除以下检测**（均为已知限制，需仓库外可信锚点如签名/MAC 才能防御）：候选的删除/替换、envelope 整体替换或重放、复用已有合法 Note/receipt 指向不同候选、候选 `source_excerpt_sha256`/`candidate_id` 自身的恶意改写（当 Note/Receipt 未同步篡改时）。系统按"结构/交叉绑定校验"而非"authenticity/completeness"对待 pending。
 
 ### 7.3 重启 / 迁移语义
 
 - **进程内 capability 不跨进程/重启**：已批注的 approval 在新进程须重新经 UI 确认（有意为 fail-closed）。
 - **pending 候选跨会话持续**：`.project-memory/pending/` 是持久化状态，重新打开项目时由 reconcile/Gate 重验；伪造 resolution 会恢复为 unresolved 并在 reconcile 报告。
 - **仓库 checkout 丢失 `.project-memory` 内文件**：索引/缓存可重建；Note 与 pending 为主要数据；若整目录被外部删除，视同无记忆（fail-closed，不猜测恢复）。
+- **版本重绑定语义（v0.3.3 → v0.3.4 迁移）**：v0.3.3 捕获的 Note 无 `candidate_id`、skipped 无 receipt；升级到 v0.3.4 后，此类历史 resolution 会在读取时被重验为不可信，安全地恢复为 unresolved（并可由 reconcile 报 `PENDING_RESOLUTION_INVALID`）。**不允许添加弱化三重绑定的 legacy fallback**；正确的迁移动作是重新 capture/acknowledge 绑定（升级说明，非自动迁移）。
 
 ### 7.4 信任主体与文档一致性
 

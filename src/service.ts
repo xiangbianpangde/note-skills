@@ -1956,24 +1956,42 @@ export class ProjectMemory {
       }
       const missing = ids.filter((id) => !found.has(id))
       if (missing.length) throw new ProjectMemoryError('NOT_FOUND', `pending candidates not found: ${missing.join(', ')}`)
-      // Phase 2: commit all validated mutations. Each envelope is written to a
-      // temporary file first; only after every temp write succeeds are they
-      // renamed into place. A failure before the rename loop leaves the store
-      // untouched, so a batch commit cannot half-apply resolutions.
-      commitPendingMutations(
-        mutations.map((mutation) => ({
+      // Phase 2: commit ALL validated mutations — envelope files AND skip
+      // receipts — as one staged batch (every temp write first, then unified
+      // rename). A failure during staging leaves everything untouched, so a
+      // multi-candidate skip cannot half-settle: either every candidate is
+      // resolved with its receipt, or none of the writes are applied.
+      const receiptMutations = skipReceiptEntries.map((entry) => {
+        const receiptFile = skipReceiptPath(this.cwd, entry.candidateId)
+        rejectSymlinkComponents(this.cwd, receiptFile, `pending/.receipts/${entry.candidateId}.json`, 'INCONSISTENT')
+        const payload = {
+          schema_version: 1,
+          envelope_id: entry.envelopeId,
+          candidate_id: entry.candidateId,
+          tool_call_id: entry.tool_call_id,
+          reason_sha256: sha256hex(entry.reason),
+          resolved_at: entry.resolved_at,
+        }
+        return {
+          file: receiptFile,
+          content: JSON.stringify(payload, null, 2) + '\n',
+        }
+      })
+      const batch = [
+        ...mutations.map((mutation) => ({
           file: mutation.file,
           content: JSON.stringify(mutation.envelope, null, 2) + '\n',
         })),
-      )
-      // Phase 3: durable skip receipts (skip is only trusted with a matching
-      // receipt; the envelope JSON alone is forgeable).
-      for (const entry of skipReceiptEntries)
-        writeSkipReceipt(this.cwd, entry.envelopeId, entry.candidateId, {
-          tool_call_id: entry.tool_call_id,
-          reason: entry.reason,
-          resolved_at: entry.resolved_at,
-        })
+        ...receiptMutations,
+      ]
+      commitPendingMutations(batch)
+      // Phase 3: verify receipts read back (never trust a silent partial write).
+      for (const entry of skipReceiptEntries) {
+        const file = skipReceiptPath(this.cwd, entry.candidateId)
+        const after = tryReadText(file)
+        if (after === null)
+          throw new ProjectMemoryError('INTERNAL', `skip receipt missing after commit: ${file}`)
+      }
       return resolved
     } finally {
       releaseLockFile(lockPath, lockFd)
@@ -3001,24 +3019,7 @@ function skipReceiptPath(cwd: string, candidateId: string): string {
   return path.join(pendingDir(cwd), '.receipts', `${candidateId}.json`)
 }
 
-function writeSkipReceipt(
-  cwd: string,
-  envelopeId: string,
-  candidateId: string,
-  resolution: { tool_call_id: string; reason: string; resolved_at: string },
-): void {
-  const payload = {
-    schema_version: 1,
-    envelope_id: envelopeId,
-    candidate_id: candidateId,
-    tool_call_id: resolution.tool_call_id,
-    reason_sha256: sha256hex(resolution.reason),
-    resolved_at: resolution.resolved_at,
-  }
-  const file = skipReceiptPath(cwd, candidateId)
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n')
-}
+
 
 function skipReceiptExists(
   cwd: string,

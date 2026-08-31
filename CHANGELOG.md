@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.5 - 2026-08-31
+
+- P1 (audit #7): skip-receipt writes are project-contained (rejectSymlinkComponents before any write), atomic (writeFileAtomic + readback), and batched WITH the envelope mutations (one staged batch, unified rename) — a receipt write failure can no longer half-settle a multi-candidate skip or land a receipt outside the project via a planted symlink.
+- Threat model clarified (security-and-authority.md §7.2): pending JSON authenticity/completeness is explicitly NOT claimed (excludes candidate deletion/replacement/replay/reuse without external anchor); the design guarantees structure + cross-binding verification only.
+- §7.3 migration semantics: v0.3.3→v0.3.4 re-binding (no legacy fallback; re-capture/acknowledge required).
+- Tests: 64 -> 65 (symlink receipts escape, dir target, no half-settle batch).
+
 ## 0.3.4 - 2026-08-31
 
 - P1 (audit #6): candidate-to-Note binding now requires candidate_id in addition to source identity + excerpt hash (`candidateBindsToNote`). Same-short-block same-type occurrences now carry distinct candidate identities, so resolution-only forgery of B pointing at A's note reverts B to unresolved. `captureAndResolvePending` merges candidate_id + excerpt into the Note source_refs; `mergeInto` dedupes on the full identity (source + excerpt + candidate id) so the normal merged path can settle candidates too.
