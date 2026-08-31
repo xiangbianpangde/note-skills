@@ -1559,17 +1559,20 @@ test("capture committed but resolution conflicts: error exposes note_id and note
       },
     ],
   } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
-  // First, claim the candidate with an independent resolve (simulating another
-  // process winning the race), so captureAndResolvePending's pre-check fails.
-  const note = memory.capture({
-    type: "risk",
-    title: "Race note",
-    summary: "durable note",
-    rationale: "x",
-    next_action: "x",
-    source_refs: [{ kind: "conversation", ref: "pi-session://s-race", turn_id: "l-race", excerpt_sha256: "55".repeat(32) }],
-  });
-  memory.resolvePendingCapture([candId], { status: "captured", tool_call_id: "race-winner", note_id: note.id });
+  // First, claim the candidate with an ATOMIC bind (the other process must use
+  // the same trusted path — a non-atomic settle cannot prove binding).
+  const raceWin = memory.captureAndResolvePending(
+    [candId],
+    {
+      type: "risk",
+      title: "Race note",
+      summary: "durable note",
+      rationale: "x",
+      next_action: "x",
+      source_refs: [{ kind: "conversation", ref: "pi-session://s-race", turn_id: "l-race" }],
+    },
+    "race-winner",
+  );
   // captureAndResolvePending pre-validates the candidate set BEFORE capture:
   // since the candidate is already resolved, the call must fail WITHOUT any
   // new note side effect (pre-check is strictly better than post-write failure).
@@ -1679,4 +1682,133 @@ test("cross-settlement forgery: candidate B cannot be settled by note A via hand
   const remaining = new ProjectMemory(cwd).pendingCaptureCandidates();
   assert.equal(remaining.length, 1, "forged cross-settlement must revert B to unresolved");
   assert.equal(remaining[0]!.candidate_id, `cand_${`33`.repeat(16)}`);
+});
+
+test("same-block same-excerpt candidates cannot cross-settle (real occurrence binding)", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  // Two risk candidates with IDENTICAL source identity and IDENTICAL excerpt
+  // hash (short block => same raw excerpt), distinguished only by candidate_id.
+  const sameExcerpt = "9c".repeat(32);
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`ab`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-same",
+    source_leaf_id: "l-same",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: `cand_${`cd`.repeat(16)}`,
+        type: "risk",
+        markers: ["风险"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-same", turn_id: "l-same" },
+        source_excerpt: "风险 A 迁移。风险 B 插件。",
+        source_excerpt_sha256: sameExcerpt,
+        detected_at: now,
+        resolution: null,
+      },
+      {
+        candidate_id: `cand_${`ef`.repeat(16)}`,
+        type: "risk",
+        markers: ["风险"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-same", turn_id: "l-same" },
+        source_excerpt: "风险 A 迁移。风险 B 插件。",
+        source_excerpt_sha256: sameExcerpt,
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // Atomically bind candidate A only.
+  const boundA = memory.captureAndResolvePending(
+    [`cand_${`cd`.repeat(16)}`],
+    {
+      type: "risk",
+      title: "Risk A",
+      summary: "A",
+      rationale: "x",
+      next_action: "x",
+      source_refs: [{ kind: "conversation", ref: "pi-session://s-same", turn_id: "l-same" }],
+    },
+    "same-call-a",
+  );
+  assert.equal(boundA.resolved.length, 1);
+  // Forge: point candidate B's resolution at A's note.
+  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`ab`.repeat(16)}.json`);
+  const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
+    candidates: Array<{ candidate_id: string; resolution: unknown }>;
+  };
+  const bIdx = obj.candidates.findIndex((c) => c.candidate_id === `cand_${`ef`.repeat(16)}`);
+  obj.candidates[bIdx]!.resolution = {
+    status: "captured",
+    tool_call_id: "fake",
+    note_id: boundA.receipt.id,
+    resolved_at: now,
+  };
+  fs.writeFileSync(envFile, JSON.stringify(obj));
+  const remaining = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.equal(remaining.length, 1, "same-excerpt candidate B must revert to unresolved");
+  assert.equal(remaining[0]!.candidate_id, `cand_${`ef`.repeat(16)}`);
+});
+
+test("forged status:skipped resolution reverts to unresolved without a receipt", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const candId = `cand_${`11`.repeat(16)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`22`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-skip",
+    source_leaf_id: "l-skip",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId,
+        type: "risk",
+        markers: ["风险"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-skip", turn_id: "l-skip" },
+        source_excerpt: "skip test",
+        source_excerpt_sha256: "33".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // Legit acknowledge path writes a receipt; verify trusted read keeps it resolved.
+  memory.resolvePendingCapture([candId], { status: "skipped", tool_call_id: "real-call", reason: "false positive" });
+  const afterLegit = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.equal(afterLegit.length, 0, "legit skip with receipt stays resolved");
+  // Forge: hand-edit a different candidate to skipped WITHOUT receipt.
+  const candId2 = `cand_${`44`.repeat(16)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`55`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-skip2",
+    source_leaf_id: "l-skip2",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId2,
+        type: "risk",
+        markers: ["风险"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-skip2", turn_id: "l-skip2" },
+        source_excerpt: "skip test 2",
+        source_excerpt_sha256: "66".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`55`.repeat(16)}.json`);
+  const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
+    candidates: Array<{ candidate_id: string; resolution: unknown }>;
+  };
+  obj.candidates[0]!.resolution = { status: "skipped", tool_call_id: "fake", reason: "fake reason", resolved_at: now };
+  fs.writeFileSync(envFile, JSON.stringify(obj));
+  const afterForged = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.equal(afterForged.length, 1, "forged skip without receipt must revert to unresolved");
+  assert.equal(afterForged[0]!.candidate_id, candId2);
 });

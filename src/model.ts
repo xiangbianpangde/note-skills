@@ -159,6 +159,13 @@ export interface SourceRef {
   observed_at?: string
   /** Bound excerpt hash (sha256) when a stable excerpt is captured. */
   excerpt_sha256?: string
+  /**
+   * Candidate identity when this source_ref was merged from a pending-capture
+   * candidate: binds the Note to the EXACT candidate (not merely a shared
+   * session/leaf + excerpt), so forged cross-settlement between same-type
+   * same-session candidates is rejected.
+   */
+  candidate_id?: string
 }
 
 export interface RelatedFile {

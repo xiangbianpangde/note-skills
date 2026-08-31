@@ -18,7 +18,7 @@
  *   pm.reconcile()                              // index drift auto-repaired
  */
 
-export const VERSION = '0.3.3'
+export const VERSION = '0.3.4'
 
 export * from './model.ts'
 export * from './storage.ts'

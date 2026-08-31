@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.4 - 2026-08-31
+
+- Candidate binding requires the exact candidate id (plus source identity and excerpt hash); same-block same-type occurrences are distinct.
+- Skips require a durable receipt; hand-edited skip resolutions revert to unresolved.
+- Reconcile surfaces untrusted pending resolutions (PENDING_RESOLUTION_INVALID).
+
 ## 0.3.3 - 2026-08-31
 
 - Candidate settlement binds to the exact excerpt (source identity + excerpt hash); forged cross-settlement between same-type same-session candidates is reverted to unresolved.

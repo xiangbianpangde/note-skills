@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.4 - 2026-08-31
+
+- P1 (audit #6): candidate-to-Note binding now requires candidate_id in addition to source identity + excerpt hash (`candidateBindsToNote`). Same-short-block same-type occurrences now carry distinct candidate identities, so resolution-only forgery of B pointing at A's note reverts B to unresolved. `captureAndResolvePending` merges candidate_id + excerpt into the Note source_refs; `mergeInto` dedupes on the full identity (source + excerpt + candidate id) so the normal merged path can settle candidates too.
+- P2: `status:skipped` resolutions are only trusted with a durable skip-receipt written by `resolvePendingCapture` (envelope_id + candidate_id + tool_call_id + reason hash + resolved_at). Hand-edited skip without a matching receipt reverts to unresolved.
+- P2: reconcile now reports untrusted persisted resolutions as `PENDING_RESOLUTION_INVALID` (same trusted verification as the Gate) so forgery is surfaced.
+- Tests: 62 -> 64 (same-block same-excerpt cross-settlement, forged skip w/o receipt).
+
 ## 0.3.3 - 2026-08-31
 
 - P1 (fourth-audit cross-settlement): candidate-to-Note binding now requires BOTH the source identity AND the candidate's excerpt hash (`candidateBindsToNote`). Same-session same-type candidates can no longer be cross-settled by pointing a forged resolution at another candidate's Note. `captureAndResolvePending()` merges each candidate's `excerpt_sha256` into the Note source_refs so atomic binds satisfy the full identity; `pendingCaptureCandidates()` and `resolvePendingCapture()` re-verify with the same rule.

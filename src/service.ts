@@ -846,11 +846,18 @@ export class ProjectMemory {
 
       const note = structuredClone(current.note)
       const added: SourceRef[] = []
-      const have = new Set(note.source_refs.map(sourceKey))
+      // Full-identity dedupe: source identity + excerpt hash + candidate id.
+      // The plain sourceKey merge would drop candidate-bound refs during a
+      // merge (e.g. same session/leaf, different candidate), breaking the
+      // candidate binding that captureAndResolvePending relies on.
+      const fullSourceKey = (source: SourceRef) =>
+        `${sourceKey(source)}\u0000${source.excerpt_sha256 ?? ''}\u0000${source.candidate_id ?? ''}`
+      const have = new Set(note.source_refs.map(fullSourceKey))
       for (const source of input.source_refs) {
-        if (!have.has(sourceKey(source))) {
+        const key = fullSourceKey(source)
+        if (!have.has(key)) {
           note.source_refs.push(source)
-          have.add(sourceKey(source))
+          have.add(key)
           added.push(source)
         }
       }
@@ -1806,8 +1813,20 @@ export class ProjectMemory {
           }
           continue
         }
-        if (resolution.status === 'skipped' && !resolution.reason?.trim()) {
-          out.push({ ...candidate, resolution: null })
+        if (resolution.status === 'skipped') {
+          // Trusted skip requires a matching durable receipt; without it the
+          // candidate reverts to unresolved (hand-edited skip is not proof).
+          if (
+            !resolution.reason?.trim() ||
+            !skipReceiptExists(
+              this.cwd,
+              envelope.envelope_id,
+              candidate.candidate_id,
+              resolution as { tool_call_id: string; reason: string; resolved_at: string },
+            )
+          ) {
+            out.push({ ...candidate, resolution: null })
+          }
         }
       }
     }
@@ -1842,6 +1861,13 @@ export class ProjectMemory {
       const found = new Set<string>()
       const mutations: Array<{ envelope: PendingCaptureEnvelope; file: string }> = []
       const resolved: PendingCaptureCandidate[] = []
+      const skipReceiptEntries: Array<{
+        envelopeId: string
+        candidateId: string
+        tool_call_id: string
+        reason: string
+        resolved_at: string
+      }> = []
       const at = new Date().toISOString()
 
       // Captured resolutions must bind to a REAL, this-project Note whose type
@@ -1877,7 +1903,17 @@ export class ProjectMemory {
                     candidateBindsToNote(bound.note, candidate)
                   )
                 })()) ||
-              (diskResolution.status === 'skipped' && !!diskResolution.reason?.trim())
+              // Skip is trusted only with a matching skip-receipt (the JSON
+              // alone is forgeable: status:skipped + fake tool_call_id would
+              // silently settle the candidate).
+              (diskResolution.status === 'skipped' &&
+                !!diskResolution.reason?.trim() &&
+                skipReceiptExists(
+                  this.cwd,
+                  envelope.envelope_id,
+                  candidate.candidate_id,
+                  diskResolution as { tool_call_id: string; reason: string; resolved_at: string },
+                ))
             if (resolutionTrusted) {
               if (
                 diskResolution.tool_call_id === resolution.tool_call_id &&
@@ -1906,6 +1942,15 @@ export class ProjectMemory {
           candidate.resolution = { ...resolution, resolved_at: at }
           changed = true
           resolved.push(candidate)
+          if (resolution.status === 'skipped' && resolution.reason) {
+            skipReceiptEntries.push({
+              envelopeId: envelope.envelope_id,
+              candidateId: candidate.candidate_id,
+              tool_call_id: resolution.tool_call_id,
+              reason: resolution.reason,
+              resolved_at: at,
+            })
+          }
         }
         if (changed) mutations.push({ envelope, file: pendingEnvelopePath(this.cwd, envelope.envelope_id) })
       }
@@ -1921,6 +1966,14 @@ export class ProjectMemory {
           content: JSON.stringify(mutation.envelope, null, 2) + '\n',
         })),
       )
+      // Phase 3: durable skip receipts (skip is only trusted with a matching
+      // receipt; the envelope JSON alone is forgeable).
+      for (const entry of skipReceiptEntries)
+        writeSkipReceipt(this.cwd, entry.envelopeId, entry.candidateId, {
+          tool_call_id: entry.tool_call_id,
+          reason: entry.reason,
+          resolved_at: entry.resolved_at,
+        })
       return resolved
     } finally {
       releaseLockFile(lockPath, lockFd)
@@ -1976,22 +2029,28 @@ export class ProjectMemory {
     // detection and capture).
     const candidateSources: SourceRef[] = ids.map((id) => ({
       ...byId.get(id)!.source_ref,
-      // Carry the candidate excerpt hash so the Note's source_ref binds to
-      // THIS candidate (sourceKey alone would allow cross-settlement between
-      // same-session candidates of the same type).
+      // Carry the candidate excerpt hash AND candidate id so the Note's
+      // source_ref binds to THIS exact candidate (sourceKey + excerpt alone
+      // still collides for same-short-block same-type occurrences).
       excerpt_sha256: byId.get(id)!.source_excerpt_sha256,
+      candidate_id: byId.get(id)!.candidate_id,
     }))
-    // Dedupe only on the FULL identity (source key + excerpt): an input
-    // source_ref that shares the session/leaf but has a DIFFERENT excerpt
-    // must NOT suppress the candidate's excerpted source (the binding needs it).
-    const fullSourceKey = (source: SourceRef) => `${sourceKey(source)}\u0000${source.excerpt_sha256 ?? ''}`
+    // Full-identity dedupe (source identity + excerpt + candidate id); the set
+    // is updated as each source is accepted so later duplicates are dropped.
+    const fullSourceKey = (source: SourceRef) =>
+      `${sourceKey(source)}\u0000${source.excerpt_sha256 ?? ''}\u0000${source.candidate_id ?? ''}`
     const seenSource = new Set(input.source_refs.map((source) => fullSourceKey(source)))
+    const mergedSourceRefs = [...input.source_refs]
+    for (const source of candidateSources) {
+      const key = fullSourceKey(source)
+      if (!seenSource.has(key)) {
+        seenSource.add(key)
+        mergedSourceRefs.push(source)
+      }
+    }
     const mergedInput: CaptureInput = {
       ...input,
-      source_refs: [
-        ...input.source_refs,
-        ...candidateSources.filter((source) => !seenSource.has(fullSourceKey(source))),
-      ],
+      source_refs: mergedSourceRefs,
     }
 
     // Capture first (creates/merges a Note inside the fingerprint lock).
@@ -2329,13 +2388,32 @@ export class ProjectMemory {
 
     // --- durable pending capture and approval registries ---
     try {
+      // Trusted unresolved set: candidates whose persisted resolution did NOT
+      // re-verify (forged captured/skip w/o receipt) are reported as tampered
+      // AND still unresolved, so reconcile and the Gate agree.
+      const trustedUnresolved = new Set(
+        this.pendingCaptureCandidates().map((candidate) => candidate.candidate_id),
+      )
       for (const envelope of this.pendingCaptureEnvelopes()) {
-        const unresolved = envelope.candidates.filter((candidate) => candidate.resolution === null)
-        if (unresolved.length > 0)
+        const unresolvedIds: string[] = []
+        const tamperedIds: string[] = []
+        for (const candidate of envelope.candidates) {
+          if (trustedUnresolved.has(candidate.candidate_id)) {
+            unresolvedIds.push(candidate.candidate_id)
+            if (candidate.resolution !== null) tamperedIds.push(candidate.candidate_id)
+          }
+        }
+        if (unresolvedIds.length > 0)
           issues.push({
             severity: 'warning',
             code: 'PENDING_CAPTURE',
-            message: `${envelope.envelope_id} has unresolved candidates: ${unresolved.map((candidate) => candidate.candidate_id).join(', ')}`,
+            message: `${envelope.envelope_id} has unresolved candidates: ${unresolvedIds.join(', ')}`,
+          })
+        if (tamperedIds.length > 0)
+          issues.push({
+            severity: 'error',
+            code: 'PENDING_RESOLUTION_INVALID',
+            message: `${envelope.envelope_id} has untrusted persisted resolutions reverted to unresolved: ${tamperedIds.join(', ')}`,
           })
       }
     } catch (error) {
@@ -2437,22 +2515,32 @@ export class ProjectMemory {
 const MEMORY_ROOT_NAME = '.project-memory'
 
 function sourceKey(s: SourceRef): string {
-  return [s.kind, s.ref, s.turn_id ?? ''].join('\u0000')
+  return [s.kind, s.ref, s.turn_id ?? '', s.candidate_id ?? ''].join('\u0000')
 }
 
 /**
  * Full candidate-to-Note binding: a Note source_ref must match the candidate's
- * source identity AND carry the candidate's excerpt hash. Without the excerpt
- * check, two same-type candidates sharing one session+leaf (two distinct risks
- * in one conversation) could be cross-settled by pointing B's forged
- * resolution at A's Note — both would show the same sourceKey.
+ * source identity AND carry the candidate's excerpt hash AND the candidate id.
+ * Without candidate identity, same-type candidates sharing one session+leaf
+ * (two distinct risks in one short message block) produce identical excerpt
+ * hashes, so pointing B's forged resolution at A's Note would pass — both show
+ * the same sourceKey + excerpt. The candidate_id closes that gap.
  */
 function candidateBindsToNote(note: Note, candidate: PendingCaptureCandidate): boolean {
-  const candidateSourceKey = sourceKey(candidate.source_ref)
+  // Candidate-side identity: source identity + the candidate's own id. The
+  // candidate's source_ref does not carry candidate_id, so construct the full
+  // key here (mirrors the Note source_refs produced by captureAndResolvePending).
+  const candidateSourceKey = [
+    candidate.source_ref.kind,
+    candidate.source_ref.ref,
+    candidate.source_ref.turn_id ?? '',
+    candidate.candidate_id,
+  ].join('\u0000')
   const candidateExcerpt = candidate.source_excerpt_sha256
   return note.source_refs.some((source) => {
     if (sourceKey(source) !== candidateSourceKey) return false
-    if (!candidateExcerpt) return true
+    if (source.candidate_id !== candidate.candidate_id) return false
+    if (!candidateExcerpt) return false
     return source.excerpt_sha256 === candidateExcerpt
   })
 }
@@ -2903,6 +2991,64 @@ function pendingEnvelopePath(cwd: string, envelopeId: string): string {
   if (!PENDING_ENVELOPE_ID_RE.test(envelopeId))
     throw new ProjectMemoryError('INVALID_INPUT', 'invalid pending envelope_id')
   return path.join(pendingDir(cwd), `${envelopeId}.json`)
+}
+
+/** Skip-receipt anchor: a skip resolution is only trusted with a matching
+ * receipt written by resolvePendingCapture (the JSON alone is forgeable). */
+function skipReceiptPath(cwd: string, candidateId: string): string {
+  if (!PENDING_CANDIDATE_ID_RE.test(candidateId))
+    throw new ProjectMemoryError('INVALID_INPUT', 'invalid candidate id for skip receipt')
+  return path.join(pendingDir(cwd), '.receipts', `${candidateId}.json`)
+}
+
+function writeSkipReceipt(
+  cwd: string,
+  envelopeId: string,
+  candidateId: string,
+  resolution: { tool_call_id: string; reason: string; resolved_at: string },
+): void {
+  const payload = {
+    schema_version: 1,
+    envelope_id: envelopeId,
+    candidate_id: candidateId,
+    tool_call_id: resolution.tool_call_id,
+    reason_sha256: sha256hex(resolution.reason),
+    resolved_at: resolution.resolved_at,
+  }
+  const file = skipReceiptPath(cwd, candidateId)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n')
+}
+
+function skipReceiptExists(
+  cwd: string,
+  envelopeId: string,
+  candidateId: string,
+  resolution: { tool_call_id: string; reason: string; resolved_at: string },
+): boolean {
+  try {
+    const file = skipReceiptPath(cwd, candidateId)
+    rejectSymlinkComponents(cwd, file, `pending/.receipts/${candidateId}.json`, 'INCONSISTENT')
+    const parsed = tryReadJson<{
+      schema_version: number
+      envelope_id: string
+      candidate_id: string
+      tool_call_id: string
+      reason_sha256: string
+      resolved_at: string
+    }>(file)
+    if (!parsed) return false
+    return (
+      parsed.schema_version === 1 &&
+      parsed.envelope_id === envelopeId &&
+      parsed.candidate_id === candidateId &&
+      parsed.tool_call_id === resolution.tool_call_id &&
+      parsed.reason_sha256 === sha256hex(resolution.reason) &&
+      parsed.resolved_at === resolution.resolved_at
+    )
+  } catch {
+    return false
+  }
 }
 
 function validatePendingEnvelope(envelope: PendingCaptureEnvelope, projectId: string): void {
