@@ -2,7 +2,16 @@
 
 ## 0.4.0 - 2026-08-31
 
-- **Rebrand to Note Skills** (breaking): package name `pi-project-memory` → `note-skills`; tool name `project_memory` → `note_skills`; data directory `.project-memory` → `.note-skills`; skill/extension/design-doc paths renamed (`skills/project-memory/` → `skills/note-skills/`, `extensions/project-memory.ts` → `extensions/note-skills.ts`, `Project_Memory_Design.md` → `Note_Skills_Design.md`); all brand text updated. No behavior/invariant change — the signed v0.3.6 security model (triple binding, trusted scan, threat model §7) is unchanged. Tool name and data directory are breaking API changes; package was not yet published (npm 404), so no migration cost.
+- **Rebrand to Note Skills** (breaking):
+  - npm package: `pi-project-memory` → `note-skills`
+  - tool name: `project_memory` → `note_skills` (TOOL_NAME + all tool-call docs)
+  - data directory: `.project-memory` → `.note-skills` (MEMORY_ROOT + all derived paths)
+  - user commands: `project-memory-init`/`project-memory-reconcile` → `note-skills-init`/`note-skills-reconcile`
+  - Pi entry/customType namespaces: `note-skills-*` (receipt/retrieval/capture-gate)
+  - skill/extension/design-doc paths: `skills/project-memory/` → `skills/note-skills/`, `extensions/project-memory.ts` → `extensions/note-skills.ts`, `Project_Memory_Design.md` → `Note_Skills_Design.md`
+  - canonical backlink marker: `project-memory-derived-from:` → `note-skills-derived-from:`
+  - all brand text updated (LICENSE/README/CHANGELOG, internal TS symbol names kept as-is)
+- No behavior/invariant change — the signed v0.3.6 security model (triple binding, trusted scan, threat model §7) is unchanged. Breaking API surface is the rename itself; package was not yet published (npm 404), so no migration cost. Old `.project-memory/` is NOT read by v0.4.0; projects that ran v0.3.x would need explicit re-capture (see §7.3 re-binding semantics).
 
 ## 0.3.6 - 2026-08-31
 

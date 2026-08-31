@@ -55,6 +55,8 @@ function extensionHarness() {
 test("extension registers one memory tool, lifecycle gates, and user commands", () => {
   const { tools, commands, events } = extensionHarness();
   assert.equal(tools.length, 1);
+  // Lock the breaking rename: tool name must stay note_skills (v0.4.0 rename fix).
+  assert.equal(tools[0]!.name, "note_skills");
   const parameters = (tools[0] as unknown as { parameters: { properties?: Record<string, unknown> } }).parameters;
   assert.equal(parameters.properties?.approved, undefined);
   assert.ok(parameters.properties?.candidate_ids);

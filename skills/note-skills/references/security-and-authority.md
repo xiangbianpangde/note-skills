@@ -93,6 +93,7 @@ Canonical 当前状态（规范、代码、Issue、实验记录、被接受的�
 - **pending 候选跨会话持续**：`.note-skills/pending/` 是持久化状态，重新打开项目时由 reconcile/Gate 重验；伪造 resolution 会恢复为 unresolved 并在 reconcile 报告。
 - **仓库 checkout 丢失 `.note-skills` 内文件**：索引/缓存可重建；Note 与 pending 为主要数据；若整目录被外部删除，视同无记忆（fail-closed，不猜测恢复）。
 - **版本重绑定语义（v0.3.3 → v0.3.4 迁移）**：v0.3.3 捕获的 Note 无 `candidate_id`、skipped 无 receipt；升级到 v0.3.4 后，此类历史 resolution 会在读取时被重验为不可信，安全地恢复为 unresolved（并可由 reconcile 报 `PENDING_RESOLUTION_INVALID`）。**不允许添加弱化三重绑定的 legacy fallback**；正确的迁移动作是重新 capture/acknowledge 绑定（升级说明，非自动迁移）。
+- **v0.3.x → v0.4.0 根目录改名**：v0.4.0 不读取 `.project-memory`。若旧根存在且携带旧存储标记（config.yaml/notes/pending/index/backlinks），`init` 会 fail-fast 报 `CONFLICT` 提示迁移，而不是静默新建 `.note-skills` 并存两套数据；迁移动作为归档旧根后重新 capture（无自动迁移，与上一条语义一致）。仅同名空目录不触发（无标记即非旧存储）。
 
 ### 7.4 信任主体与文档一致性
 

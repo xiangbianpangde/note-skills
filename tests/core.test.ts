@@ -82,6 +82,24 @@ test("uninitialized projects fail closed on read and retrieval paths", () => {
   expectCode(() => memory.taskStartRetrieval(), "MISSING_CONFIG");
 });
 
+test("init fails fast when a legacy v0.3.x .project-memory root exists", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-legacy-root-"));
+  const legacy = path.join(cwd, ".project-memory");
+  fs.mkdirSync(path.join(legacy, "notes", "decision"), { recursive: true });
+  fs.writeFileSync(path.join(legacy, "config.yaml"), "schema_version: 1\nproject_id: old\n");
+  fs.writeFileSync(
+    path.join(legacy, "notes", "decision", "PM-OLD-0001.md"),
+    "# note\n",
+  );
+  // v0.4.0 must refuse to silently start a fresh store next to old data.
+  expectCode(() => new ProjectMemory(cwd).init({ project_id: "legacy" }), "CONFLICT");
+  // A directory simply NAMED .project-memory without store markers is not treated as legacy.
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-false-positive-"));
+  fs.mkdirSync(path.join(empty, ".project-memory"));
+  const res = new ProjectMemory(empty).init({ project_id: "fresh" });
+  assert.equal(res.created, true);
+});
+
 test("six note types capture, exact dedup, search, and index rebuild", () => {
   const { cwd, memory } = fixture();
   const ids: string[] = [];

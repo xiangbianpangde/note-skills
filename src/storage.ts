@@ -174,6 +174,20 @@ export function assertMemoryRootSafe(cwd: string): void {
   }
 }
 
+/**
+ * Heuristic: is this a real v0.3.x memory root (not just a directory that
+ * happens to be named .project-memory)? Only treat it as legacy when it
+ * carries the old store's markers: a config.yaml, a notes/ tree, or a
+ * pending/ directory. Failing to detect is safe (fresh store); a false
+ * positive would only warn on a directory the user likely wants gone anyway.
+ */
+function isValidLegacyRoot(dir: string): boolean {
+  for (const marker of ['config.yaml', 'notes', 'pending', 'index', 'backlinks']) {
+    if (fs.existsSync(path.join(dir, marker))) return true
+  }
+  return false
+}
+
 /** Create the full .note-skills tree (idempotent). */
 export function ensureMemoryDirs(cwd: string): void {
   assertMemoryRootSafe(cwd)
@@ -330,6 +344,19 @@ export function initProjectStorage(
 ): { config: ConfigFile; created: boolean } {
   assertProjectDir(cwd)
   assertMemoryRootSafe(cwd)
+  // v0.3.x legacy data detection: .project-memory is NOT read by v0.4.0 and
+  // old notes cannot auto-migrate (§7.3 re-binding semantics). Fail fast and
+  // surface the migration need instead of silently starting a fresh store.
+  const legacyRoot = path.join(cwd, '.project-memory')
+  if (fs.existsSync(legacyRoot) && isValidLegacyRoot(legacyRoot)) {
+    throw new ProjectMemoryError(
+      'CONFLICT',
+      `legacy v0.3.x memory root detected at .project-memory — v0.4.0 uses .note-skills and does ` +
+        `not read old notes. Re-capture/acknowledge legacy pending (§7.3) or archive the old root ` +
+        `before re-initializing (no automatic migration).`,
+      { file: legacyRoot },
+    )
+  }
   if (!PROJECT_ID_RE.test(opts.project_id)) {
     throw new ProjectMemoryError(
       'INVALID_INPUT',
