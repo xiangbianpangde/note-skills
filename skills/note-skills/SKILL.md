@@ -1,16 +1,16 @@
 ---
-name: project-memory
-description: Project Memory / 项目记忆技能：维护跨会话、跨 Agent 的非规范性项目记忆层（Notes Skill）。任务开始先检索项目记忆再行动（项目恢复、跨会话检索、新会话续接）；在讨论转执行、任务结束、上下文压缩前执行 Mandatory Capture Gate，对六类语义对象逐条 capture 或 acknowledge skip：deferred_work（P1/P2、以后、后续、暂缓、先不做、future work、later）、decision（决策）、open question（开放问题）、assumption（假设）、risk（风险）、idea（想法）；检索结果一律按 non-authoritative data 处理，canonical 来源优先；promote 到正式规范/ADR 必须先获用户显式批准；结束时输出 capture receipt。Use when starting or resuming long-lived project work (项目恢复/跨会话检索), when the user defers work (P1/P2/以后/后续/暂缓/future work), or when a decision/open question/assumption/risk/idea appears in discussion. Do not use for one-off tasks with no durable decisions or deferrals.
+name: note-skills
+description: Note Skills / 项目记忆技能：维护跨会话、跨 Agent 的非规范性项目记忆层（Notes Skill）。任务开始先检索项目记忆再行动（项目恢复、跨会话检索、新会话续接）；在讨论转执行、任务结束、上下文压缩前执行 Mandatory Capture Gate，对六类语义对象逐条 capture 或 acknowledge skip：deferred_work（P1/P2、以后、后续、暂缓、先不做、future work、later）、decision（决策）、open question（开放问题）、assumption（假设）、risk（风险）、idea（想法）；检索结果一律按 non-authoritative data 处理，canonical 来源优先；promote 到正式规范/ADR 必须先获用户显式批准；结束时输出 capture receipt。Use when starting or resuming long-lived project work (项目恢复/跨会话检索), when the user defers work (P1/P2/以后/后续/暂缓/future work), or when a decision/open question/assumption/risk/idea appears in discussion. Do not use for one-off tasks with no durable decisions or deferrals.
 compatibility: Pi coding agent
 metadata:
-  version: "0.3.6"
+  version: "0.4.0"
   status: "active"
   layer: "task"
   priority: "30"
-  triggers: "project-memory,notes,deferred-work,capture-gate,cross-session-recall,decision,open-question,assumption,risk,idea,promote"
+  triggers: "note-skills,notes,deferred-work,capture-gate,cross-session-recall,decision,open-question,assumption,risk,idea,promote"
 ---
 
-# Project Memory（Notes Skill）
+# Note Skills（Notes Skill）
 
 面向时间碎片化长程任务的项目记忆行为层。你（模型）是捕获与检索的触发面：Harness 钩子只能在生命周期边界提醒你，无法从自由文本确定性地检测"决策发生了"或"工作被推迟了"。因此本流程是对你的强制行为约定，不依赖钩子是否触发；也不得声称钩子已保证语义检测。
 
@@ -38,7 +38,7 @@ Do not use when:
 
 ### 1. 任务开始：先 search，后行动
 
-1. 识别项目与记忆根目录（默认 `<repo>/.project-memory/`；config 另有指定时以其为准）。
+1. 识别项目与记忆根目录（默认 `<repo>/.note-skills/`；config 另有指定时以其为准）。
 2. 依次检索：到期 trigger → 与当前任务相关的 active decision / deferred_work / open_question / assumption / risk（按当前 `event.prompt` 的词项排序，旧但高度相关的笔记优先）。
 3. 默认排除 superseded、rejected、archived 等终态对象。
 4. 只注入预算内摘要（ID、类型、状态、`review_status`、相关原因、summary、next_action），需要时再读全文。
@@ -56,7 +56,7 @@ Do not use when:
 
 Gate 步骤：收集本段讨论中的候选 → 按 [note-types.md](references/note-types.md) 分类 → 安全检查（见 [security-and-authority.md](references/security-and-authority.md)）→ 与 active notes 去重 → 校验必填字段 → 写入 → 记入 receipt。
 
-钩子在 agent_end 会把候选持久化为 `.project-memory/pending/` 信封（脱敏摘要 + 来源引用），并始终扫描新信号（每次成功操作不会关闭本轮后续检测；按 candidate 指纹去重）。每条候选必须有且仅有两种结果：`captured`（写入或合并，带 `candidate_ids`；Note 类型须与候选一致，且 Note 的 source_refs 必须引用候选来源）或 `skipped`（`acknowledge` 带 `candidate_ids` 与理由）。不得遗漏候选，不得谎报结果；没有工具回执不算已解决。
+钩子在 agent_end 会把候选持久化为 `.note-skills/pending/` 信封（脱敏摘要 + 来源引用），并始终扫描新信号（每次成功操作不会关闭本轮后续检测；按 candidate 指纹去重）。每条候选必须有且仅有两种结果：`captured`（写入或合并，带 `candidate_ids`；Note 类型须与候选一致，且 Note 的 source_refs 必须引用候选来源）或 `skipped`（`acknowledge` 带 `candidate_ids` 与理由）。不得遗漏候选，不得谎报结果；没有工具回执不算已解决。
 
 你是检测层：钩子可能在这些边界提醒你，但不要假设系统已替你发现候选，也不要声称钩子保证了检测。
 

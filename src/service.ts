@@ -1,5 +1,5 @@
 /**
- * service.ts — deterministic Project Memory service layer.
+ * service.ts — deterministic Note Skills service layer.
  *
  * The model (via a Skill) decides WHAT is semantically valuable; this layer
  * decides HOW it is stored, validated, deduplicated, retrieved, promoted and
@@ -274,12 +274,12 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
     bad('rationale', 'must be non-empty')
   if (typeof note.next_action !== 'string' || note.next_action.trim() === '')
     bad('next_action', 'must be non-empty')
-  // Authority invariant (§7.2): notes in .project-memory can only ever be
+  // Authority invariant (§7.2): notes in .note-skills can only ever be
   // 'memory' — 'canonical'/'source' exist only on the canonical side.
   if (note.authority !== 'memory')
     bad(
       'authority',
-      `notes in .project-memory must have authority "memory", got ${JSON.stringify(note.authority)} (canonical/source belong to the canonical side only — §7.2)`,
+      `notes in .note-skills must have authority "memory", got ${JSON.stringify(note.authority)} (canonical/source belong to the canonical side only — §7.2)`,
     )
   if (note.priority !== undefined && !PRIORITIES.includes(note.priority))
     bad('priority', `must be one of ${PRIORITIES.join(', ')}`)
@@ -443,7 +443,7 @@ export function validateNote(note: Note, opts: { idRequired?: boolean } = {}): V
       else if (isUnsafeProjectRelativePath(tgt.path))
         bad(
           'promotion.target.path',
-          `must be a project-relative path that cannot escape .project-memory (got ${JSON.stringify(tgt.path)})`,
+          `must be a project-relative path that cannot escape .note-skills (got ${JSON.stringify(tgt.path)})`,
         )
       if (typeof tgt.kind !== 'string' || tgt.kind.trim() === '')
         bad('promotion.target.kind', 'must be a non-empty string')
@@ -486,7 +486,7 @@ export interface InitProjectOptions {
   /**
    * Optional project-relative canonical state file (milestone statuses) for
    * lazy trigger evaluation. Must live inside the project, outside
-   * .project-memory. When unset, triggers are not evaluated — never guessed.
+   * .note-skills. When unset, triggers are not evaluated — never guessed.
    */
   canonical_state_file?: string
 }
@@ -501,7 +501,7 @@ export interface CaptureInput {
   status?: string
   priority?: Priority
   tags?: string[]
-  /** Always 'memory' for notes stored in .project-memory (§7.2). */
+  /** Always 'memory' for notes stored in .note-skills (§7.2). */
   authority?: NoteAuthority
   confidence?: Confidence
   sensitivity?: Sensitivity
@@ -538,7 +538,7 @@ export interface UpdatePatch {
   status_reason?: string
   priority?: Priority
   tags?: string[]
-  /** Always 'memory' for notes stored in .project-memory (§7.2). */
+  /** Always 'memory' for notes stored in .note-skills (§7.2). */
   authority?: NoteAuthority
   confidence?: Confidence
   sensitivity?: Sensitivity
@@ -774,7 +774,7 @@ export class ProjectMemory {
       next_action: input.next_action.trim(),
       status_reason: input.status_reason ?? null,
       acceptance_evidence: input.acceptance_evidence ?? null,
-      created_by: input.created_by ?? { kind: 'tool', id: 'project-memory' },
+      created_by: input.created_by ?? { kind: 'tool', id: 'note-skills' },
       created_at: now,
       updated_at: now,
       promotion: defaultPromotionInfo(),
@@ -1220,11 +1220,11 @@ export class ProjectMemory {
 
   /**
    * Load the configured canonical state file (project-relative, outside
-   * .project-memory) for lazy trigger evaluation. Returns null when unset or
+   * .note-skills) for lazy trigger evaluation. Returns null when unset or
    * the file does not exist yet — triggers are then NOT evaluated, never
    * guessed (§11.8). Throws INCONSISTENT when the file exists but its shape
    * is not a milestone map. This loader never reads notes or anything under
-   * .project-memory, so notes can never self-trigger (§11.7).
+   * .note-skills, so notes can never self-trigger (§11.7).
    */
   loadCanonicalState(): TriggerState | null {
     const cfg = readConfig(this.cwd)
@@ -2091,7 +2091,7 @@ export class ProjectMemory {
       // The Note is already durable; do NOT pretend the whole call failed.
       throw new ProjectMemoryError(
         'INCONSISTENT',
-        `capture committed (${receipt.id}) but candidate resolution failed: ${error instanceof Error ? error.message : String(error)} — run project_memory capture again with the same candidate_ids and source to bind them`,
+        `capture committed (${receipt.id}) but candidate resolution failed: ${error instanceof Error ? error.message : String(error)} — run note_skills capture again with the same candidate_ids and source to bind them`,
         { note_id: receipt.id, candidate_ids: ids, cause: error instanceof Error ? error.message : String(error) },
       )
     }
@@ -2534,7 +2534,7 @@ export class ProjectMemory {
 /* Internals                                                           */
 /* ================================================================== */
 
-const MEMORY_ROOT_NAME = '.project-memory'
+const MEMORY_ROOT_NAME = '.note-skills'
 
 function sourceKey(s: SourceRef): string {
   return [s.kind, s.ref, s.turn_id ?? '', s.candidate_id ?? ''].join('\u0000')
@@ -2573,7 +2573,7 @@ function formatIssues(issues: { field?: string; message: string }[]): string {
 
 /**
  * Static path-shape guard for persisted promotion metadata. Rejects absolute
- * paths, `..` escapes, and anything inside .project-memory before any dynamic
+ * paths, `..` escapes, and anything inside .note-skills before any dynamic
  * (symlink/existence) check runs. The dynamic checks live in scan()/reconcile().
  */
 function isUnsafeProjectRelativePath(relPath: string): boolean {
@@ -2686,7 +2686,7 @@ function resolvePromotionTarget(cwd: string, request: PromotionRequest): Resolve
   if (typeof payload !== 'string')
     throw new ProjectMemoryError('INVALID_INPUT', 'promotion payload must be a string')
   if (IN_FILE_MARKER_RE.test(payload))
-    throw new ProjectMemoryError('INVALID_INPUT', 'promotion payload must not forge a Project Memory backlink')
+    throw new ProjectMemoryError('INVALID_INPUT', 'promotion payload must not forge a Note Skills backlink')
   assertTargetMetaStrings(requested, 'target')
   const target: CanonicalTarget = {
     kind: (requested.kind ?? 'file') as CanonicalTargetKind,
@@ -2841,7 +2841,7 @@ interface LiveCapability {
 
 /**
  * Approval files on disk are data, not credentials: a hand-written JSON under
- * .project-memory/approvals/ proves nothing. Only a capability minted in THIS
+ * .note-skills/approvals/ proves nothing. Only a capability minted in THIS
  * process by recordPromotionApproval() (which itself requires a live Pi UI
  * confirmation) can authorize the canonical mutation. The registry is
  * process-local; a restarted session must re-confirm before promoting.

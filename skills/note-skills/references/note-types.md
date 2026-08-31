@@ -1,6 +1,6 @@
 # Note Types — 六类语义对象的字段与状态
 
-本文件定义 Project Memory 的六类 Mandatory Capture 对象：识别信号、必录字段、合法状态与关闭/提升标准。SKILL.md 的 Gate 步骤 3 引用本文件。
+本文件定义 Note Skills 的六类 Mandatory Capture 对象：识别信号、必录字段、合法状态与关闭/提升标准。SKILL.md 的 Gate 步骤 3 引用本文件。
 
 ## 通用必填字段（frontmatter）
 

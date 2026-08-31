@@ -12,7 +12,7 @@ SKILL.md 的步骤 2–5 引用本文件。
 - 每条候选结果只能是 `captured`（新建或合并）或 `skipped`（含理由）；六类各自记 `none` 表示讨论中未出现。
 - 去重：先取确定性候选集（同 project、同 type、关联同一对象、处于活动状态），再语义判断是否同一对象。合并只追加来源/关系/新信息，不改写旧 rationale；语义实质变化时用 `supersedes` 建 revision。
 - 幂等：同一讨论重复执行 Gate 不得产生重复 note；重试时先查已有对象。
-- 持久化：agent_end 钩子把候选写成 `.project-memory/pending/<envelope>.json`（脱敏摘要 + 来源引用 + 哈希）；capture/acknowledge 必须带 `candidate_ids` 逐条解析。
+- 持久化：agent_end 钩子把候选写成 `.note-skills/pending/<envelope>.json`（脱敏摘要 + 来源引用 + 哈希）；capture/acknowledge 必须带 `candidate_ids` 逐条解析。
 - 写入失败：如实记入 receipt 的 `errors`，不得报成功；不无限重试。
 
 ## 2. 检索流程（任务开始）

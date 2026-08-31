@@ -15,10 +15,10 @@ test("pi package manifest points to existing extension and skill", () => {
   assert.ok(manifest.keywords.includes("pi-package"));
   for (const relative of manifest.pi.extensions) assert.ok(fs.existsSync(path.resolve(root, relative)));
   for (const relative of manifest.pi.skills) assert.ok(fs.existsSync(path.resolve(root, relative)));
-  assert.ok(fs.existsSync(path.join(root, "skills", "project-memory", "SKILL.md")));
-  assert.ok(manifest.files.includes("Project_Memory_Design.md"));
+  assert.ok(fs.existsSync(path.join(root, "skills", "note-skills", "SKILL.md")));
+  assert.ok(manifest.files.includes("Note_Skills_Design.md"));
   const packed = JSON.parse(
     execFileSync("npm", ["pack", "--dry-run", "--json"], { cwd: root, encoding: "utf8" }),
   ) as Array<{ files: Array<{ path: string }> }>;
-  assert.ok(packed[0]!.files.some((file) => file.path === "Project_Memory_Design.md"));
+  assert.ok(packed[0]!.files.some((file) => file.path === "Note_Skills_Design.md"));
 });

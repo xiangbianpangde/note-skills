@@ -1,11 +1,11 @@
 /**
- * model.ts — Project Memory core data model.
+ * model.ts — Note Skills core data model.
  *
  * Type-level contract for the Note object (YAML frontmatter of a Markdown note
  * file). Mirrors ../schemas/note.schema.json. Deterministic core: no AI/model
  * dependency anywhere in this layer.
  *
- * Design references: Project_Memory_Design.md §5 (memory layering), §8 (Note
+ * Design references: Note_Skills_Design.md §5 (memory layering), §8 (Note
  * data model), §8.5 (type-specific statuses), §8.6 (relations), §11.6
  * (Trigger data model).
  */
@@ -108,7 +108,7 @@ export type Authority = 'memory' | 'canonical' | 'source'
 export const AUTHORITIES: readonly Authority[] = ['memory', 'canonical', 'source']
 
 /**
- * Notes stored in .project-memory ALWAYS carry authority 'memory' (§7.2):
+ * Notes stored in .note-skills ALWAYS carry authority 'memory' (§7.2):
  * canonical/source truth lives only in the canonical sources themselves.
  * Writing any other value into a note would create a second source of truth.
  */
@@ -266,7 +266,7 @@ export interface PromotionInfo {
   target: CanonicalTarget | null
   promotion_id: string | null
   promoted_at: string | null
-  /** 'in_file' = marker embedded in canonical file; 'link_file' = .project-memory/backlinks/. */
+  /** 'in_file' = marker embedded in canonical file; 'link_file' = .note-skills/backlinks/. */
   backlink: BacklinkMode | null
   backlink_verified: boolean
 }

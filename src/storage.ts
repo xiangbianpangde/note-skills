@@ -1,8 +1,8 @@
 /**
- * storage.ts — filesystem layer for Project Memory.
+ * storage.ts — filesystem layer for Note Skills.
  *
  * Responsibilities (all deterministic, no AI dependency):
- *   - .project-memory/ layout: config.yaml, notes/<type-dir>/, index/, backlinks/
+ *   - .note-skills/ layout: config.yaml, notes/<type-dir>/, index/, backlinks/
  *   - Markdown + YAML frontmatter parsing/serialization
  *   - Stable ID allocation via exclusive create (O_EXCL / 'wx') so concurrent
  *     captures can never collide on an ID
@@ -25,7 +25,7 @@ import type { ErrorCode, Note, NoteType, Trigger, TriggerCondition } from './mod
 /* Layout (§15.3)                                                      */
 /* ------------------------------------------------------------------ */
 
-export const MEMORY_ROOT = '.project-memory'
+export const MEMORY_ROOT = '.note-skills'
 export const CONFIG_FILE = 'config.yaml'
 export const NOTES_DIR = 'notes'
 export const INDEX_DIR = 'index'
@@ -139,7 +139,7 @@ export function rejectSymlinkComponents(
 }
 
 /**
- * Fail-closed guard for the whole .project-memory tree: the memory root, its
+ * Fail-closed guard for the whole .note-skills tree: the memory root, its
  * fixed subdirectories (notes, index, backlinks, the six type dirs) must never
  * be symlinks — otherwise config/note/index writes could land outside the
  * project, or reads could reach outside content. Missing components (not yet
@@ -147,14 +147,14 @@ export function rejectSymlinkComponents(
  */
 export function assertMemoryRootSafe(cwd: string): void {
   const targets: Array<[string, string]> = [
-    [memoryRoot(cwd), '.project-memory'],
-    [notesRoot(cwd), '.project-memory/notes'],
-    [indexDir(cwd), '.project-memory/index'],
-    [backlinksDir(cwd), '.project-memory/backlinks'],
-    [locksDir(cwd), '.project-memory/locks'],
-    [approvalsDir(cwd), '.project-memory/approvals'],
-    [pendingDir(cwd), '.project-memory/pending'],
-    ...TYPE_DIRS.map((d) => [path.join(notesRoot(cwd), d), `.project-memory/notes/${d}`] as [string, string]),
+    [memoryRoot(cwd), '.note-skills'],
+    [notesRoot(cwd), '.note-skills/notes'],
+    [indexDir(cwd), '.note-skills/index'],
+    [backlinksDir(cwd), '.note-skills/backlinks'],
+    [locksDir(cwd), '.note-skills/locks'],
+    [approvalsDir(cwd), '.note-skills/approvals'],
+    [pendingDir(cwd), '.note-skills/pending'],
+    ...TYPE_DIRS.map((d) => [path.join(notesRoot(cwd), d), `.note-skills/notes/${d}`] as [string, string]),
   ]
   for (const [abs, label] of targets) {
     let st: fs.Stats | null = null
@@ -174,7 +174,7 @@ export function assertMemoryRootSafe(cwd: string): void {
   }
 }
 
-/** Create the full .project-memory tree (idempotent). */
+/** Create the full .note-skills tree (idempotent). */
 export function ensureMemoryDirs(cwd: string): void {
   assertMemoryRootSafe(cwd)
   fs.mkdirSync(notesRoot(cwd), { recursive: true })
@@ -200,9 +200,9 @@ export interface ConfigFile {
   /**
    * Optional project-relative path to the canonical state file (milestone
    * statuses etc.) that lazy Trigger evaluation reads. Must live inside the
-   * project, outside .project-memory. When unset (or the file is absent),
+   * project, outside .note-skills. When unset (or the file is absent),
    * triggers are NOT evaluated — never guessed, and never self-triggered from
-   * notes or from state inside .project-memory (§11.7–§11.8).
+   * notes or from state inside .note-skills (§11.7–§11.8).
    */
   canonical_state_file?: string
 }
@@ -299,7 +299,7 @@ export function readConfig(cwd: string): ConfigFile {
 
 /**
  * Validate a project-relative path: non-empty, not absolute, resolves inside
- * the project cwd, and never inside the .project-memory root. Existence is
+ * the project cwd, and never inside the .note-skills root. Existence is
  * checked by the caller. Used for canonical_state_file and promote targets.
  */
 export function assertProjectRelativePath(cwd: string, rel: string, label: string): string {
@@ -367,10 +367,10 @@ export function initProjectStorage(
       : {}),
   }
   writeFileAtomic(file, yaml.stringify(cfg))
-  // .project-memory/README.md: authority boundary + usage rules (kept minimal).
-  const readme = `# Project Memory
+  // .note-skills/README.md: authority boundary + usage rules (kept minimal).
+  const readme = `# Note Skills
 
-Managed by the Project Memory core (filesystem-first, hook-enforced).
+Managed by the Note Skills core (filesystem-first, hook-enforced).
 
 - Raw note objects: \`notes/<type>/\` (Markdown + YAML frontmatter).
 - \`index/\` is derived and rebuildable — never edit by hand.
@@ -894,18 +894,18 @@ export function indexNoteEntries(cwd: string, valid: ScannedRaw[]): { notes: Ind
 /* ------------------------------------------------------------------ */
 
 export const IN_FILE_MARKER_RE =
-  /project-memory-derived-from:\s*([^;\s]+)\s*;\s*promotion_id:\s*([^;\s>]+)/
+  /note-skills-derived-from:\s*([^;\s]+)\s*;\s*promotion_id:\s*([^;\s>]+)/
 
 export function inFileMarker(noteId: string, promotionId: string, promotedAt: string): string {
-  return `<!-- project-memory-derived-from: ${noteId}; promotion_id: ${promotionId}; promoted_at: ${promotedAt} -->`
+  return `<!-- note-skills-derived-from: ${noteId}; promotion_id: ${promotionId}; promoted_at: ${promotedAt} -->`
 }
 
 /** Plain-text line marker (e.g. .txt targets) with the same parse format. */
 export function inFileMarkerLine(noteId: string, promotionId: string, promotedAt: string): string {
-  return `# project-memory-derived-from: ${noteId}; promotion_id: ${promotionId}; promoted_at: ${promotedAt}`
+  return `# note-skills-derived-from: ${noteId}; promotion_id: ${promotionId}; promoted_at: ${promotedAt}`
 }
 
-/** Deterministic name for the .project-memory/backlinks/<hash>.md record. */
+/** Deterministic name for the .note-skills/backlinks/<hash>.md record. */
 export function linkFileFor(cwd: string, relTarget: string): string {
   return path.join(backlinksDir(cwd), `bl-${sha256hex(relTarget).slice(0, 12)}.md`)
 }
@@ -942,7 +942,7 @@ export function parseBacklinkFileThatExists(file: string): BacklinkRecord | null
   return { ...rec, file }
 }
 
-/** Read all link-file backlink records in .project-memory/backlinks/. */
+/** Read all link-file backlink records in .note-skills/backlinks/. */
 export function readBacklinks(cwd: string): BacklinkRecord[] {
   const dir = backlinksDir(cwd)
   let names: string[] = []
@@ -964,7 +964,7 @@ export function readBacklinks(cwd: string): BacklinkRecord[] {
 
 export function serializeBacklinkFile(rec: Omit<BacklinkRecord, 'file'>): string {
   return [
-    '# Project Memory backlink',
+    '# Note Skills backlink',
     '',
     `- target: ${rec.target}`,
     `- kind: ${rec.kind ?? 'file'}`,

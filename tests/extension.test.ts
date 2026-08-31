@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 
-import projectMemoryExtension, { detectCaptureSignals } from "../extensions/project-memory.ts";
+import projectMemoryExtension, { detectCaptureSignals } from "../extensions/note-skills.ts";
 import { ProjectMemory } from "../src/index.ts";
 
 test("capture signal detector covers all six durable categories", () => {
@@ -58,14 +58,14 @@ test("extension registers one memory tool, lifecycle gates, and user commands", 
   const parameters = (tools[0] as unknown as { parameters: { properties?: Record<string, unknown> } }).parameters;
   assert.equal(parameters.properties?.approved, undefined);
   assert.ok(parameters.properties?.candidate_ids);
-  assert.deepEqual(new Set(commands), new Set(["project-memory-init", "project-memory-reconcile"]));
+  assert.deepEqual(new Set(commands), new Set(["note-skills-init", "note-skills-reconcile"]));
   for (const event of ["session_start", "before_agent_start", "agent_settled", "agent_end", "session_before_compact"]) {
     assert.ok(events.has(event), `missing event ${event}`);
   }
 });
 
 test("task-start retrieval is bounded and explicitly non-authoritative", () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-retrieval-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-retrieval-"));
   const memory = new ProjectMemory(cwd);
   memory.init({ project_id: "extension-retrieval" });
   for (let index = 0; index < 12; index += 1) {
@@ -95,7 +95,7 @@ test("task-start retrieval is bounded and explicitly non-authoritative", () => {
 });
 
 test("before_agent_start uses the actual prompt to retrieve older relevant memory", () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-prompt-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-prompt-"));
   const memory = new ProjectMemory(cwd);
   memory.init({ project_id: "extension-prompt" });
   const relevant = memory.capture({
@@ -131,7 +131,7 @@ test("before_agent_start uses the actual prompt to retrieve older relevant memor
 });
 
 test("an uncaptured durable signal persists candidate envelopes before fail-open compaction", () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-gate-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-gate-"));
   new ProjectMemory(cwd).init({ project_id: "extension-gate" });
   const { events, sent, entries } = extensionHarness();
   const ctx = {
@@ -142,7 +142,7 @@ test("an uncaptured durable signal persists candidate envelopes before fail-open
   };
   events.get("agent_end")!({ messages: [{ role: "user", content: "P1 后续再考虑插件" }] }, ctx);
   assert.equal(sent.length, 1);
-  assert.equal((sent[0] as { customType: string }).customType, "project-memory-capture-gate");
+  assert.equal((sent[0] as { customType: string }).customType, "note-skills-capture-gate");
   const pending = new ProjectMemory(cwd).pendingCaptureCandidates();
   assert.ok(pending.length >= 1);
   assert.match(pending[0]!.candidate_id, /^cand_[0-9a-f]{32}$/);
@@ -159,7 +159,7 @@ test("an uncaptured durable signal persists candidate envelopes before fail-open
 });
 
 test("a successful capture suppresses the end-of-run duplicate gate", async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-test-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-test-"));
   new ProjectMemory(cwd).init({ project_id: "extension-test" });
   const { tools, events, sent, entries } = extensionHarness();
   let approvalPrompt = "";
@@ -200,7 +200,7 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
   // it was bound via candidate_ids, which is the only form of "handled").
   events.get("agent_end")!({ messages: [{ role: "user", content: "P1 later" }] }, ctx as never);
   assert.equal(sent.length, 1);
-  assert.equal((sent[0] as { customType: string }).customType, "project-memory-capture-gate");
+  assert.equal((sent[0] as { customType: string }).customType, "note-skills-capture-gate");
   const pendingAfterCapture = new ProjectMemory(cwd).pendingCaptureCandidates();
   assert.ok(pendingAfterCapture.length >= 1);
   // Resolve ALL candidates via acknowledge (the same signal may trigger
@@ -223,7 +223,7 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
   assert.equal(sent.length, beforeSecond, "resolved candidates must not re-trigger the gate");
   assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 0);
   const receipt = entries[0] as { type: string; data: { gate: string; tool_call_id: string; id: string } };
-  assert.equal(receipt.type, "project-memory-receipt");
+  assert.equal(receipt.type, "note-skills-receipt");
   assert.equal(receipt.data.gate, "capture");
   assert.equal(receipt.data.tool_call_id, "call-1");
   assert.match(receipt.data.id, /^PM-IDE-/);
@@ -260,7 +260,7 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
 });
 
 test("agent_end yields per-block candidates: two distinct same-type risks get two candidates", () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-blocks-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-blocks-"));
   new ProjectMemory(cwd).init({ project_id: "extension-blocks" });
   const { events, sent } = extensionHarness();
   const ctx = {
@@ -284,7 +284,7 @@ test("agent_end yields per-block candidates: two distinct same-type risks get tw
 });
 
 test("capture with candidate_ids binds across a leaf change (Core merges candidate provenance)", () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-leaf-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-leaf-"));
   const memory = new ProjectMemory(cwd);
   memory.init({ project_id: "extension-leaf" });
   const now = new Date().toISOString();
@@ -330,7 +330,7 @@ test("capture with candidate_ids binds across a leaf change (Core merges candida
 });
 
 test("same block, same marker, two distinct same-type units yield two candidates", () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-occ-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-occ-"));
   new ProjectMemory(cwd).init({ project_id: "extension-occ" });
   const { events } = extensionHarness();
   const ctx = {
@@ -357,7 +357,7 @@ test("same block, same marker, two distinct same-type units yield two candidates
 });
 
 test("handled risk A then new risk B in same leaf still yields a B candidate", async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-ab-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-ab-"));
   const memory = new ProjectMemory(cwd);
   memory.init({ project_id: "extension-ab" });
   const { tools, events } = extensionHarness();

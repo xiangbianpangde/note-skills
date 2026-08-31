@@ -1,5 +1,5 @@
 /**
- * index.ts — Project Memory core entry point.
+ * index.ts — Note Skills core entry point.
  *
  * Exports the full deterministic core API + types for Pi extensions, skills
  * and tests. The core itself has no AI/model dependency; the only runtime
@@ -18,7 +18,7 @@
  *   pm.reconcile()                              // index drift auto-repaired
  */
 
-export const VERSION = '0.3.6'
+export const VERSION = '0.4.0'
 
 export * from './model.ts'
 export * from './storage.ts'

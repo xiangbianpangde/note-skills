@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 - 2026-08-31
+
+- Brand rename: package `pi-project-memory` → `note-skills`; tool `project_memory` → `note_skills`; data dir `.project-memory` → `.note-skills`; skill dir `skills/project-memory/` → `skills/note-skills/`. No security-model/invariant change from signed v0.3.6. Breaking API change (tool name, data dir) — package not yet published, no migration cost.
+
 ## 0.3.6 - 2026-08-31
 
 - Skip-receipt Phase 3 verification now matches exact receipt content; merged-path settle fixed as a regression test.
@@ -68,7 +72,7 @@
 ## 0.2.0 - 2026-08-30
 
 - Promote now requires a content-bound single-use approval: the extension displays the exact target bytes and hashes in a Pi UI confirmation before minting an `approval_ref`; the model cannot self-approve.
-- Capture Gate candidates are persisted durably under `.project-memory/pending/`; each candidate must be resolved by capture or acknowledge with `candidate_ids`.
+- Capture Gate candidates are persisted durably under `.note-skills/pending/`; each candidate must be resolved by capture or acknowledge with `candidate_ids`.
 - Retrieval is prompt-relevant: task-start retrieval ranks notes by the actual user prompt terms.
 - Canonical conflict evidence in the canonical state file marks hits `needs_review` via a separate `review_status`; lifecycle statuses are untouched.
 - Secret policy scans the full normalized note (trigger, relations, created_by, …), and manually edited notes are quarantined on read.
@@ -81,6 +85,6 @@
 
 ## 0.1.0 - 2026-08-29
 
-- Initial release of the `project-memory` task skill (v0.1.0): task-start retrieval first, Mandatory Capture Gate at discussion-to-execution / task end / pre-compaction checkpoints, six semantic note types with capture-or-acknowledge-skip, retrieval treated as non-authoritative data, user-approved promote only, and end-of-task capture receipts.
+- Initial release of the `note-skills` task skill (v0.1.0): task-start retrieval first, Mandatory Capture Gate at discussion-to-execution / task end / pre-compaction checkpoints, six semantic note types with capture-or-acknowledge-skip, retrieval treated as non-authoritative data, user-approved promote only, and end-of-task capture receipts.
 - Explicit capability boundary: model-side capture is a behavioral contract; no claim of harness-guaranteed semantic detection.
 - Detail split on demand: `references/note-types.md` (fields/statuses per type), `references/lifecycle.md` (gate, retrieval, triggers, promote, reconcile, cross-session resume), `references/security-and-authority.md` (authority ordering, sensitive-data policy, fail-closed, provenance, injection handling).

@@ -9,7 +9,7 @@ SKILL.md 的步骤 4–5 与 Gate 安全检查引用本文件。
 ```text
 Canonical 当前状态（规范、代码、Issue、实验记录、被接受的结论）
   > 项目正式承认的 active decision/ADR
-  > active Project Memory note
+  > active Note Skills note
   > superseded / archived note
   > raw discussion
 ```
@@ -76,8 +76,8 @@ Canonical 当前状态（规范、代码、Issue、实验记录、被接受的�
 |---|---|
 | 模型（工具调用者）伪造审批/来源/终态 | 内容绑定 approval + 进程内 capability + CAS；来源不可覆盖；终态须 reason |
 | 手工编辑 Note（authority/project_id/secret/fingerprint/duplicate ID） | trusted scan；隔离 + reconcile 报告 |
-| 手工编辑 `.project-memory/pending/` 的 resolution | 读取时按同规则重验；伪造 captured/skip 重判 unresolved |
-| 手工编辑 `.project-memory/config.yaml` | schema/正则/路径校验，非法即 INCONSISTENT |
+| 手工编辑 `.note-skills/pending/` 的 resolution | 读取时按同规则重验；伪造 captured/skip 重判 unresolved |
+| 手工编辑 `.note-skills/config.yaml` | schema/正则/路径校验，非法即 INCONSISTENT |
 | 并发/协作进程（遵守 lock 协议） | fingerprint/note/approval/target/pending 锁 + CAS |
 | 符号链接/路径逃逸 | project-relative + symlink + isFile 校验（静态检查） |
 
@@ -85,16 +85,16 @@ Canonical 当前状态（规范、代码、Issue、实验记录、被接受的�
 
 - **本地恶意并发进程的路径交换（TOCTOU）**：校验与实际 read/write 之间存在 check-then-use 窗口。若威胁模型包含"同用户下不遵守 lock 协议的恶意进程"，需要用 dirfd/O_NOFOLLOW/renameat 级原语重写路径处理；**当前版本不声称防御此类攻击**，仅防御"操作开始时已存在"的 symlink 与静态逃逸。
 - **拥有仓库写权限并直接修改源码/配置的攻击者**：本包的安全保证建立在其自身的信任代码路径上；仓库写者有能力替换任何校验逻辑。`git` 提交历史与 reviewed diff 是主要防线。
-- **`.project-memory/pending` 的身份与数量不可由 JSON 自证（有限边界）**：本设计只保证**候选身份保持不变**时对 resolution-only 修改的检测（captured 由 Note 的 source_refs 三重绑定回验；skipped 由 durable skip-receipt 回验）。**明确排除以下检测**（均为已知限制，需仓库外可信锚点如签名/MAC 才能防御）：候选的删除/替换、envelope 整体替换或重放、复用已有合法 Note/receipt 指向不同候选、候选 `source_excerpt_sha256`/`candidate_id` 自身的恶意改写（当 Note/Receipt 未同步篡改时）。系统按"结构/交叉绑定校验"而非"authenticity/completeness"对待 pending。
+- **`.note-skills/pending` 的身份与数量不可由 JSON 自证（有限边界）**：本设计只保证**候选身份保持不变**时对 resolution-only 修改的检测（captured 由 Note 的 source_refs 三重绑定回验；skipped 由 durable skip-receipt 回验）。**明确排除以下检测**（均为已知限制，需仓库外可信锚点如签名/MAC 才能防御）：候选的删除/替换、envelope 整体替换或重放、复用已有合法 Note/receipt 指向不同候选、候选 `source_excerpt_sha256`/`candidate_id` 自身的恶意改写（当 Note/Receipt 未同步篡改时）。系统按"结构/交叉绑定校验"而非"authenticity/completeness"对待 pending。
 
 ### 7.3 重启 / 迁移语义
 
 - **进程内 capability 不跨进程/重启**：已批注的 approval 在新进程须重新经 UI 确认（有意为 fail-closed）。
-- **pending 候选跨会话持续**：`.project-memory/pending/` 是持久化状态，重新打开项目时由 reconcile/Gate 重验；伪造 resolution 会恢复为 unresolved 并在 reconcile 报告。
-- **仓库 checkout 丢失 `.project-memory` 内文件**：索引/缓存可重建；Note 与 pending 为主要数据；若整目录被外部删除，视同无记忆（fail-closed，不猜测恢复）。
+- **pending 候选跨会话持续**：`.note-skills/pending/` 是持久化状态，重新打开项目时由 reconcile/Gate 重验；伪造 resolution 会恢复为 unresolved 并在 reconcile 报告。
+- **仓库 checkout 丢失 `.note-skills` 内文件**：索引/缓存可重建；Note 与 pending 为主要数据；若整目录被外部删除，视同无记忆（fail-closed，不猜测恢复）。
 - **版本重绑定语义（v0.3.3 → v0.3.4 迁移）**：v0.3.3 捕获的 Note 无 `candidate_id`、skipped 无 receipt；升级到 v0.3.4 后，此类历史 resolution 会在读取时被重验为不可信，安全地恢复为 unresolved（并可由 reconcile 报 `PENDING_RESOLUTION_INVALID`）。**不允许添加弱化三重绑定的 legacy fallback**；正确的迁移动作是重新 capture/acknowledge 绑定（升级说明，非自动迁移）。
 
 ### 7.4 信任主体与文档一致性
 
-- `.project-memory/` 下所有状态（config、notes、pending、approvals、backlinks、index）按**不可信持久化**对待：读取路径先校验、写入路径先验证，任何与规则不符的状态被隔离并报告，而不是静默修复或默认放行。
+- `.note-skills/` 下所有状态（config、notes、pending、approvals、backlinks、index）按**不可信持久化**对待：读取路径先校验、写入路径先验证，任何与规则不符的状态被隔离并报告，而不是静默修复或默认放行。
 - 本声明是启用签字的条件之一：实现若与上述声明不一致，视为偏离，不得宣称"fail-closed"。

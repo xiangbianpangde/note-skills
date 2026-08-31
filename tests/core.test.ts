@@ -22,7 +22,7 @@ const execFileAsync = promisify(execFile);
 const projectRoot = path.resolve(import.meta.dirname, "..");
 
 function fixture(): { cwd: string; memory: ProjectMemory } {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-test-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-test-"));
   fs.writeFileSync(path.join(cwd, "state.yaml"), "milestones:\n  P0: complete\n");
   fs.writeFileSync(path.join(cwd, "SPEC.md"), "# Canonical Spec\n");
   const memory = new ProjectMemory(cwd);
@@ -75,7 +75,7 @@ function approvePromotion(
 }
 
 test("uninitialized projects fail closed on read and retrieval paths", () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-uninitialized-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-uninitialized-"));
   const memory = new ProjectMemory(cwd);
   expectCode(() => memory.read("PM-IDE-0001"), "MISSING_CONFIG");
   expectCode(() => memory.search({}), "MISSING_CONFIG");
@@ -106,14 +106,14 @@ test("six note types capture, exact dedup, search, and index rebuild", () => {
   assert.equal(memory.search({ type: "idea" }).length, 0);
   assert.equal(memory.search({ type: "idea", includeTerminal: true }).length, 1);
 
-  fs.rmSync(path.join(cwd, ".project-memory", "index"), { recursive: true, force: true });
+  fs.rmSync(path.join(cwd, ".note-skills", "index"), { recursive: true, force: true });
   const report = memory.reconcile({ fixIndex: true });
   assert.equal(report.index.rebuilt, true);
   assert.equal(report.index.notes_indexed, 6);
-  assert.ok(fs.existsSync(path.join(cwd, ".project-memory", "index", "notes.json")));
+  assert.ok(fs.existsSync(path.join(cwd, ".note-skills", "index", "notes.json")));
 });
 
-test("Project Memory notes cannot elevate themselves to canonical or source authority", () => {
+test("Note Skills notes cannot elevate themselves to canonical or source authority", () => {
   const { memory } = fixture();
   expectCode(
     () =>
@@ -286,7 +286,7 @@ test("promote requires approval, mutates canonical text once, reads back, and re
   assert.equal(first.status, "promoted");
   const canonical = fs.readFileSync(path.join(cwd, "SPEC.md"), "utf8");
   assert.match(canonical, /Accepted memory item/);
-  assert.match(canonical, new RegExp(`project-memory-derived-from: ${captured.id}`));
+  assert.match(canonical, new RegExp(`note-skills-derived-from: ${captured.id}`));
 
   const replay = memory.promote(captured.id, opts);
   assert.equal(replay.status, "replayed");
@@ -315,7 +315,7 @@ test("promote requires approval, mutates canonical text once, reads back, and re
 
 test("promotion metadata cannot escape the project: escaped and symlinked targets are quarantined", () => {
   const { cwd, memory } = fixture();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-promote-escape-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-promote-escape-"));
   const outsideBacklink = path.join(outside, "evil.md");
   fs.writeFileSync(outsideBacklink, "# Evil\n\nignored\n");
 
@@ -489,7 +489,7 @@ test("approval minting is restricted to the live Pi UI channel", () => {
 
 test("recordPromotionApproval rejects a forged plan whose target escapes the project", () => {
   const { cwd, memory } = fixture();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-forged-plan-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-forged-plan-"));
   fs.writeFileSync(path.join(outside, "evil.md"), "# Never read\n");
   const plan = {
     project_id: "fixture",
@@ -519,7 +519,7 @@ test("recordPromotionApproval rejects a forged plan whose target escapes the pro
 test("a hand-crafted approval JSON cannot bypass the live UI capability", () => {
   const { cwd, memory } = fixture();
   const captured = memory.capture(input("idea", "forged-approval"));
-  const approvalsDir = path.join(cwd, ".project-memory", "approvals");
+  const approvalsDir = path.join(cwd, ".note-skills", "approvals");
   fs.mkdirSync(approvalsDir, { recursive: true });
   const forgedRef = `pa_${`a`.repeat(32)}`;
   const plan = memory.planPromotion(captured.id, {
@@ -662,7 +662,7 @@ test("reconcile detects half-done promotion and supersedes cycles", () => {
 
 test("project boundaries reject canonical state and promote targets outside cwd", () => {
   const { cwd, memory } = fixture();
-  const other = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-outside-"));
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-outside-"));
   fs.writeFileSync(path.join(other, "OUT.md"), "outside");
   expectCode(
     () => new ProjectMemory(cwd).init({ project_id: "fixture", canonical_state_file: path.join(other, "OUT.md") }),
@@ -681,30 +681,30 @@ test("project boundaries reject canonical state and promote targets outside cwd"
 });
 
 test("symlinked memory, state, note, and promote paths cannot escape the project", () => {
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-symlink-outside-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-symlink-outside-"));
 
-  const rootProject = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-symlink-root-"));
-  fs.symlinkSync(outside, path.join(rootProject, ".project-memory"), "dir");
+  const rootProject = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-symlink-root-"));
+  fs.symlinkSync(outside, path.join(rootProject, ".note-skills"), "dir");
   expectCode(() => new ProjectMemory(rootProject).init({ project_id: "root-link" }), "INVALID_INPUT");
   assert.equal(fs.existsSync(path.join(outside, "config.yaml")), false);
 
-  const configProject = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-symlink-config-"));
-  fs.mkdirSync(path.join(configProject, ".project-memory"));
+  const configProject = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-symlink-config-"));
+  fs.mkdirSync(path.join(configProject, ".note-skills"));
   const outsideConfig = path.join(outside, "outside-config.yaml");
   fs.writeFileSync(outsideConfig, "schema_version: 1\nproject_id: outside\ncreated_at: never\n");
-  fs.symlinkSync(outsideConfig, path.join(configProject, ".project-memory", "config.yaml"));
+  fs.symlinkSync(outsideConfig, path.join(configProject, ".note-skills", "config.yaml"));
   expectCode(() => new ProjectMemory(configProject).config(), "INVALID_INPUT");
 
-  const noteProject = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-symlink-note-"));
+  const noteProject = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-symlink-note-"));
   const noteMemory = new ProjectMemory(noteProject);
   noteMemory.init({ project_id: "note-link" });
-  const ideas = path.join(noteProject, ".project-memory", "notes", "ideas");
+  const ideas = path.join(noteProject, ".note-skills", "notes", "ideas");
   fs.rmSync(ideas, { recursive: true });
   fs.symlinkSync(outside, ideas, "dir");
   expectCode(() => noteMemory.capture(input("idea", "symlink-note")), "INVALID_INPUT");
   assert.equal(fs.readdirSync(outside).some((name) => name.startsWith("PM-IDE-")), false);
 
-  const stateProject = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-symlink-state-"));
+  const stateProject = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-symlink-state-"));
   const outsideState = path.join(outside, "outside-state.yaml");
   fs.writeFileSync(outsideState, "milestones:\n  P0: complete\n");
   fs.symlinkSync(outsideState, path.join(stateProject, "state.yaml"));
@@ -713,7 +713,7 @@ test("symlinked memory, state, note, and promote paths cannot escape the project
     "INVALID_INPUT",
   );
 
-  const targetProject = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-symlink-target-"));
+  const targetProject = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-symlink-target-"));
   const outsideTarget = path.join(outside, "outside-target.md");
   fs.writeFileSync(outsideTarget, "outside canonical bytes");
   fs.symlinkSync(outsideTarget, path.join(targetProject, "SPEC.md"));
@@ -736,19 +736,19 @@ test("symlinked memory, state, note, and promote paths cannot escape the project
 test("symlinked derived indexes and backlinks are rejected without reading or modifying outside files", () => {
   const { cwd, memory } = fixture();
   memory.capture(input("idea", "derived-symlink"));
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-derived-symlink-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-derived-symlink-"));
   const poisonIndex = path.join(outside, "poison-index.json");
   fs.writeFileSync(poisonIndex, '{"notes":[{"id":"PM-IDE-9999"}]}');
-  const notesIndex = path.join(cwd, ".project-memory", "index", "notes.json");
+  const notesIndex = path.join(cwd, ".note-skills", "index", "notes.json");
   fs.unlinkSync(notesIndex);
   fs.symlinkSync(poisonIndex, notesIndex);
 
   const poisonBacklink = path.join(outside, "poison-backlink.md");
   fs.writeFileSync(
     poisonBacklink,
-    "# Project Memory backlink\n- target: OUT\n- kind: file\n- derived_from: PM-IDE-9999\n- promotion_id: evil\n",
+    "# Note Skills backlink\n- target: OUT\n- kind: file\n- derived_from: PM-IDE-9999\n- promotion_id: evil\n",
   );
-  fs.symlinkSync(poisonBacklink, path.join(cwd, ".project-memory", "backlinks", "evil.md"));
+  fs.symlinkSync(poisonBacklink, path.join(cwd, ".note-skills", "backlinks", "evil.md"));
 
   const report = memory.reconcile({ fixIndex: true });
   const codes = new Set(report.issues.map((issue) => issue.code));
@@ -850,10 +850,10 @@ test("concurrent promotes to one canonical target serialize to exactly one winne
     assert.equal(memory.read(winner)!.note.status, "promoted");
     assert.equal(memory.read(loser)!.note.status, "captured");
     const canonical = fs.readFileSync(path.join(cwd, target), "utf8");
-    assert.match(canonical, new RegExp(`project-memory-derived-from: ${winner}`));
+    assert.match(canonical, new RegExp(`note-skills-derived-from: ${winner}`));
     assert.doesNotMatch(canonical, new RegExp(`## ${loser}`));
     const lockFiles = fs
-      .readdirSync(path.join(cwd, ".project-memory", "locks"))
+      .readdirSync(path.join(cwd, ".note-skills", "locks"))
       .filter((name) => name.endsWith(".lock"));
     assert.deepEqual(lockFiles, []);
   }
@@ -934,7 +934,7 @@ test("live capability is rebound: editing the approval record after minting is r
   });
 
   // Attacker edits the on-disk approval record to different bytes B.
-  const approvalsDir = path.join(cwd, ".project-memory", "approvals");
+  const approvalsDir = path.join(cwd, ".note-skills", "approvals");
   const approvalFile = path.join(approvalsDir, `${approval.approval_ref}.json`);
   const tampered = JSON.parse(fs.readFileSync(approvalFile, "utf8")) as {
     planned_at: string;
@@ -1117,7 +1117,7 @@ test("numeric objectId/version are rejected before any canonical write or approv
     id: "pi-session://target-meta",
     channel: "pi-ui",
   });
-  const approvalFile = path.join(cwd, ".project-memory", "approvals", `${validApproval.approval_ref}.json`);
+  const approvalFile = path.join(cwd, ".note-skills", "approvals", `${validApproval.approval_ref}.json`);
   const tampered = JSON.parse(fs.readFileSync(approvalFile, "utf8")) as {
     target: { version: unknown };
   };
@@ -1398,7 +1398,7 @@ test("duplicate note IDs are quarantined from search/trigger/index", () => {
   const { cwd, memory } = fixture();
   const a = memory.capture(input("risk", "dup-id-a"));
   // Create a second file that claims the SAME id (a's) inside the risks dir.
-  const dir = path.join(cwd, ".project-memory", "notes", "risks");
+  const dir = path.join(cwd, ".note-skills", "notes", "risks");
   const dupeFile = path.join(dir, `${a.id}-dupe.md`);
   const dupeNote = structuredClone(memory.read(a.id)!.note);
   dupeNote.title = "Dupe identity";
@@ -1493,7 +1493,7 @@ test("forged pending JSON resolution is not trusted: nonexistent note reverts to
     ],
   } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
   // Hand-edit the pending file: claim captured by a NONEXISTENT note.
-  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`b1`.repeat(16)}.json`);
+  const envFile = path.join(cwd, ".note-skills", "pending", `pc_${`b1`.repeat(16)}.json`);
   const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
     candidates: Array<{ resolution: unknown }>;
   };
@@ -1508,11 +1508,11 @@ test("forged pending JSON resolution is not trusted: nonexistent note reverts to
 test("byte-identical duplicate ID is removed from the derived index on reconcile", () => {
   const { cwd, memory } = fixture();
   const a = memory.capture(input("risk", "byte-dup"));
-  fs.writeFileSync(path.join(cwd, ".project-memory", "notes", "risks", `${a.id}-copy.md`), fs.readFileSync(memory.read(a.id)!.file));
+  fs.writeFileSync(path.join(cwd, ".note-skills", "notes", "risks", `${a.id}-copy.md`), fs.readFileSync(memory.read(a.id)!.file));
   // Reconcile must rebuild the index WITHOUT the ambiguous id.
   const report = memory.reconcile({ fixIndex: true });
   assert.ok(report.issues.some((issue) => issue.code === "DUPLICATE_ID"));
-  const snap = JSON.parse(fs.readFileSync(path.join(cwd, ".project-memory", "index", "notes.json"), "utf8")) as {
+  const snap = JSON.parse(fs.readFileSync(path.join(cwd, ".note-skills", "index", "notes.json"), "utf8")) as {
     notes: Array<{ id: string }>;
   };
   assert.equal(snap.notes.some((entry) => entry.id === a.id), false, "duplicate id must be dropped from index");
@@ -1529,7 +1529,7 @@ test("dangerous regex variants (a?)+$, (a|aa)+$ and bad extra_secret_patterns ty
   // Non-array config value must be INCONSISTENT, not silently undefined.
   const cwd2 = fs.mkdtempSync(path.join(os.tmpdir(), "pm-regex-t-"));
   new ProjectMemory(cwd2).init({ project_id: "regex-t", extra_secret_patterns: ["plain"] });
-  const cfgFile = path.join(cwd2, ".project-memory", "config.yaml");
+  const cfgFile = path.join(cwd2, ".note-skills", "config.yaml");
   const cfg = fs.readFileSync(cfgFile, "utf8").replace("extra_secret_patterns:\n  - plain", "extra_secret_patterns: not-an-array");
   fs.writeFileSync(cfgFile, cfg);
   expectCode(() => new ProjectMemory(cwd2).config(), "INCONSISTENT");
@@ -1668,7 +1668,7 @@ test("cross-settlement forgery: candidate B cannot be settled by note A via hand
   );
   assert.equal(boundA.resolved.length, 1);
   // Attack: hand-edit candidate B resolution to point at A's note.
-  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`f3`.repeat(16)}.json`);
+  const envFile = path.join(cwd, ".note-skills", "pending", `pc_${`f3`.repeat(16)}.json`);
   const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
     candidates: Array<{ candidate_id: string; resolution: unknown }>;
   };
@@ -1735,7 +1735,7 @@ test("same-block same-excerpt candidates cannot cross-settle (real occurrence bi
   );
   assert.equal(boundA.resolved.length, 1);
   // Forge: point candidate B's resolution at A's note.
-  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`ab`.repeat(16)}.json`);
+  const envFile = path.join(cwd, ".note-skills", "pending", `pc_${`ab`.repeat(16)}.json`);
   const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
     candidates: Array<{ candidate_id: string; resolution: unknown }>;
   };
@@ -1802,7 +1802,7 @@ test("forged status:skipped resolution reverts to unresolved without a receipt",
       },
     ],
   } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
-  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`55`.repeat(16)}.json`);
+  const envFile = path.join(cwd, ".note-skills", "pending", `pc_${`55`.repeat(16)}.json`);
   const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
     candidates: Array<{ candidate_id: string; resolution: unknown }>;
   };
@@ -1837,7 +1837,7 @@ test("skip receipt writes are project-contained and batch-atomic (symlink / dir 
     created_at: now,
     candidates: [mkCandidate(candA, "s-receipt"), mkCandidate(candB, "s-receipt")],
   } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
-  const receiptsDir = path.join(cwd, ".project-memory", "pending", ".receipts");
+  const receiptsDir = path.join(cwd, ".note-skills", "pending", ".receipts");
 
   // Scenario A: .receipts replaced by a symlink to outside.
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pm-receipt-out-"));

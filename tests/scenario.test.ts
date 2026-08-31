@@ -22,7 +22,7 @@ async function session(cwd: string, body: string, env: Record<string, string> = 
 }
 
 test("four fresh processes preserve P1 rationale, trigger it after P0, promote it, and retain history", async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-scenario-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-scenario-"));
   fs.writeFileSync(path.join(cwd, "state.yaml"), "milestones:\n  P0: in_progress\n");
   fs.writeFileSync(path.join(cwd, "BACKLOG.md"), "# Canonical Backlog\n");
 
@@ -84,7 +84,7 @@ const due = pm.taskStartRetrieval({state:pm.loadCanonicalState(),limit:10}).due;
 const request = {
   promotion_id:'scenario-promote-1',
   target:{kind:'backlog',path:'BACKLOG.md'},
-  insertBlock:'## Multi-agent scheduling\\n\\nReview after P0; source Project Memory '+process.env.PM_ID+'.'
+  insertBlock:'## Multi-agent scheduling\\n\\nReview after P0; source Note Skills '+process.env.PM_ID+'.'
 };
 const plan = pm.planPromotion(process.env.PM_ID, request);
 const approval = pm.recordPromotionApproval(plan, {kind:'human',id:'pi-session://scenario-user',channel:'pi-ui'});
@@ -108,7 +108,7 @@ process.stdout.write(JSON.stringify({
   status:history?.note.status,
   target:history?.note.promotion.target?.path,
   source:history?.note.source_refs[0]?.ref,
-  backlink:canonical.includes('project-memory-derived-from: '+process.env.PM_ID),
+  backlink:canonical.includes('note-skills-derived-from: '+process.env.PM_ID),
   errors:pm.reconcile().issues.filter(x=>x.severity==='error').length
 }));
 `,

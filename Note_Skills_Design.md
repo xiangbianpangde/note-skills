@@ -1,4 +1,4 @@
-# Project Memory / Notes Skill 架构设计
+# Note Skills / Notes Skill 架构设计
 
 > 面向实验 Agent 与开发 Agent 的时间碎片化超长程任务连续性层
 
@@ -7,7 +7,7 @@
 | 文档版本 | v0.1 |
 | 状态 | Proposed（架构基线，尚不代表已经实现） |
 | 适用对象 | 实验 Agent、开发 Agent、长期运行 Harness、Agent 工具与 Skill 开发者 |
-| 核心定位 | filesystem-first、hook-enforced、searchable、provenance-aware 的 Project Memory Layer |
+| 核心定位 | filesystem-first、hook-enforced、searchable、provenance-aware 的 Note Skills Layer |
 | 更新日期 | 2026-08-29 |
 
 ## 0. 执行摘要
@@ -20,13 +20,13 @@
 
 1. **存在于 Context，不等于存在于 Agent 的工作状态。** 更长的上下文只能缓解遗忘，不能建立跨时间的项目连续性。
 2. **单独提供一个可选的 Notes Skill 不足以解决问题。** 当前任务的优化压力会促使模型减少工具调用与“非必要”文件，因此 Mandatory Capture 必须由 Harness Hook 强制检查。
-3. **Project Memory 的核心价值不是存档，而是未来重新激活。** Capture 只有与 Retrieval、Trigger、Promote、Reconcile 和 Provenance 形成闭环才有意义。
-4. **Project Memory 不是 Source of Truth。** 它回答“过去想过什么、为什么推迟、何时应重新考虑”；正式规范、代码、实验记录与被接受的结论回答“现在到底是什么”。
+3. **Note Skills 的核心价值不是存档，而是未来重新激活。** Capture 只有与 Retrieval、Trigger、Promote、Reconcile 和 Provenance 形成闭环才有意义。
+4. **Note Skills 不是 Source of Truth。** 它回答“过去想过什么、为什么推迟、何时应重新考虑”；正式规范、代码、实验记录与被接受的结论回答“现在到底是什么”。
 5. **第一版应保持简单。** 使用 Markdown、YAML Frontmatter、结构化筛选和文本检索即可；优先把 Hook、权威边界、状态转换、去重、Promote 与 Reconcile 做正确，复杂 RAG 后置。
 
 一句话定义：
 
-> Project Memory 是一个由 Harness 强制维护、可检索、可追溯、支持条件触发的非规范性项目记忆层；Notes Skill 是模型访问该记忆层的接口，而不是正确性的唯一保障。
+> Note Skills 是一个由 Harness 强制维护、可检索、可追溯、支持条件触发的非规范性项目记忆层；Notes Skill 是模型访问该记忆层的接口，而不是正确性的唯一保障。
 
 ---
 
@@ -107,7 +107,7 @@ Context 本身不能稳定承担这些职责。
 
 ### 2.1 目标
 
-Project Memory 应实现以下目标：
+Note Skills 应实现以下目标：
 
 1. 在讨论、任务结束与上下文压缩前，可靠捕获必须长期保存的语义对象；
 2. 在新任务、里程碑完成或项目状态变化时，主动重新激活相关记忆；
@@ -148,21 +148,21 @@ MVP 不承担以下职责：
 
 ## 3. 核心判断
 
-### 3.1 Project Memory 是基础设施，不是普通笔记功能
+### 3.1 Note Skills 是基础设施，不是普通笔记功能
 
-对于超长程 Agent，Project Memory 与 `read`、`write`、`search` 一样属于基础能力。它不是为了增加文档数量，而是为了让“尚未成为当前真值、但未来仍有价值的信息”具备生命周期。
+对于超长程 Agent，Note Skills 与 `read`、`write`、`search` 一样属于基础能力。它不是为了增加文档数量，而是为了让“尚未成为当前真值、但未来仍有价值的信息”具备生命周期。
 
 ### 3.2 Skill 是接口，Harness 是保障
 
 模型可通过 Skill 调用：
 
 ```text
-project_memory.capture()
-project_memory.search()
-project_memory.read()
-project_memory.update()
-project_memory.close()
-project_memory.promote()
+note_skills.capture()
+note_skills.search()
+note_skills.read()
+note_skills.update()
+note_skills.close()
+note_skills.promote()
 ```
 
 但以下职责必须属于确定性的 Harness：
@@ -199,7 +199,7 @@ project_memory.promote()
 
 > 当某个条件满足时，应该提醒未来的 Agent 重新考虑什么？
 
-因此 Trigger-based Retrieval 不是附加功能，而是 Project Memory 的核心能力。
+因此 Trigger-based Retrieval 不是附加功能，而是 Note Skills 的核心能力。
 
 ### 3.5 正确性不应依赖模型注意力
 
@@ -223,7 +223,7 @@ MVP 使用人类可读、Git 友好、可审计的 Markdown 与 YAML Frontmatter
 
 ### 4.4 Retrieval-first
 
-设计每一种 Note 时，都必须同时回答：未来用什么查询、状态或 Trigger 找回它。无法定义重激活方式的信息通常不值得进入 Project Memory。
+设计每一种 Note 时，都必须同时回答：未来用什么查询、状态或 Trigger 找回它。无法定义重激活方式的信息通常不值得进入 Note Skills。
 
 ### 4.5 Single Source of Truth
 
@@ -260,14 +260,14 @@ Note 是数据，不是隐式系统指令。来自外部文档或历史对话的
 | 层级 | 回答的问题 | 典型载体 | 是否权威 |
 | --- | --- | --- | --- |
 | Working Memory | 现在正在处理什么？ | 当前 Context、TaskSlice | 临时，不作为长期真值 |
-| Episodic Project Memory | 过去讨论过什么、为什么、还有什么没解决？ | Decision、Question、Risk 等 Note | 默认非规范性 |
-| Prospective Project Memory | 未来在什么条件下要重新考虑什么？ | Deferred Work、Trigger、Next Action | 默认非规范性，只负责提醒 |
+| Episodic Note Skills | 过去讨论过什么、为什么、还有什么没解决？ | Decision、Question、Risk 等 Note | 默认非规范性 |
+| Prospective Note Skills | 未来在什么条件下要重新考虑什么？ | Deferred Work、Trigger、Next Action | 默认非规范性，只负责提醒 |
 | Semantic / Canonical Project State | 项目现在到底是什么？ | 规范、ADR、代码、Issue、当前状态、ExperimentSpec、RunManifest | 是，按项目治理确定 |
 | Raw Source | 当时原始输入是什么？ | 对话引用、会议记录、原始文档、事件记录 | 是来源，不自动等于当前真值 |
 
 ### 5.1 Note
 
-Project Memory 中一个稳定、原子、结构化、可寻址的语义对象。
+Note Skills 中一个稳定、原子、结构化、可寻址的语义对象。
 
 ### 5.2 Capture Candidate
 
@@ -297,7 +297,7 @@ Hook 从讨论或执行事件中识别出的待判断信息。Candidate 在通�
                      Working Context / TaskSlice
                                │
              ┌─────────────────▼─────────────────┐
-             │ Model-facing Project Memory Skill │
+             │ Model-facing Note Skills Skill │
              │ capture/search/read/update/...    │
              └─────────────────┬─────────────────┘
                                │ proposes semantic operation
@@ -325,7 +325,7 @@ Hook 从讨论或执行事件中识别出的待判断信息。Candidate 在通�
 
 ### 6.1 组件职责
 
-#### Project Memory Skill
+#### Note Skills Skill
 
 - 为模型提供少量稳定操作；
 - 负责把任务语义转换成结构化调用；
@@ -344,7 +344,7 @@ Hook 从讨论或执行事件中识别出的待判断信息。Candidate 在通�
 
 - 保存 Markdown + YAML Frontmatter；
 - 以语义对象为单位组织；
-- 是 Project Memory 的原始记录层；
+- 是 Note Skills 的原始记录层；
 - 支持 Git diff、人工审阅和离线检索。
 
 #### Index / Retriever
@@ -383,11 +383,11 @@ Hook 从讨论或执行事件中识别出的待判断信息。Candidate 在通�
 
 ---
 
-## 7. Project Memory 与 Source of Truth 的区分
+## 7. Note Skills 与 Source of Truth 的区分
 
 ### 7.1 两者回答不同问题
 
-**Project Memory 回答：**
+**Note Skills 回答：**
 
 - 我们以前考虑过什么？
 - 为什么当时没有做？
@@ -410,7 +410,7 @@ Hook 从讨论或执行事件中识别出的待判断信息。Candidate 在通�
 ```text
 Canonical current state
   > 项目正式承认的 active Decision / ADR
-  > active Project Memory Note
+  > active Note Skills Note
   > superseded / archived Note
   > Raw discussion
 ```
@@ -694,7 +694,7 @@ MVP 至少支持：
 
 ### 9.7 不应捕获或需要受控处理的内容
 
-以下内容不应直接进入 Project Memory：
+以下内容不应直接进入 Note Skills：
 
 - 无长期价值的执行流水、重复状态播报和已存在于 Canonical Source 的全文；
 - 密钥、令牌、认证材料和其他 Secret；
@@ -895,7 +895,7 @@ canonical_conflict: false
 - 第二阶段由 Agent 根据任务需要展开 1–N 条完整 Note；
 - 原始讨论仅在需要判断理由、歧义或来源时展开。
 
-这能防止 Project Memory 本身成为新的上下文噪声源。
+这能防止 Note Skills 本身成为新的上下文噪声源。
 
 ### 11.6 Trigger 数据模型
 
@@ -1106,7 +1106,7 @@ Raw discussion
   → Claim + adjudication record
 ```
 
-Project Memory 可以保存“考虑做某实验”或“某种解释值得验证”，但不能跳过 ExperimentSpec、Run、Evidence 和裁决直接生成受支持的 Claim。
+Note Skills 可以保存“考虑做某实验”或“某种解释值得验证”，但不能跳过 ExperimentSpec、Run、Evidence 和裁决直接生成受支持的 Claim。
 
 ### 14.4 最小 Provenance 字段
 
@@ -1154,15 +1154,15 @@ MVP 不能只有 CRUD。最小闭环包括：
 ### 15.2 模型侧最小操作
 
 ```text
-project_memory.capture
-project_memory.search
-project_memory.read
-project_memory.update
-project_memory.close
-project_memory.promote
+note_skills.capture
+note_skills.search
+note_skills.read
+note_skills.update
+note_skills.close
+note_skills.promote
 ```
 
-可保留 `note.create/search/read/update/close/promote` 作为底层或兼容命名，但对外概念建议统一为 `project_memory`。
+可保留 `note.create/search/read/update/close/promote` 作为底层或兼容命名，但对外概念建议统一为 `note_skills`。
 
 ### 15.3 建议目录
 
@@ -1170,7 +1170,7 @@ project_memory.promote
 
 ```text
 <repo>/
-├── .project-memory/
+├── .note-skills/
 │   ├── README.md                 # 权威边界、使用规则、禁止事项
 │   ├── config.yaml               # project_id、canonical adapters、策略
 │   ├── schema/
@@ -1186,14 +1186,14 @@ project_memory.promote
 │       ├── notes.json
 │       └── triggers.json
 ├── tools/
-│   └── project_memory/
+│   └── note_skills/
 │       ├── capture
 │       ├── retrieve
 │       ├── promote
 │       ├── reconcile
 │       └── validate
 └── tests/
-    └── project_memory/
+    └── note_skills/
 ```
 
 目录规则：
@@ -1201,7 +1201,7 @@ project_memory.promote
 - `notes/` 中的 Markdown 是 Memory 原始对象；
 - `index/` 可删除并重建，不手工编辑；
 - 正式规范、ADR、Issue、实验与 Evidence 继续留在项目原有 Canonical 路径；
-- 不创建 `.project-memory/current.md`、第二套 Worklog 或第二个正式状态 Registry；
+- 不创建 `.note-skills/current.md`、第二套 Worklog 或第二个正式状态 Registry；
 - Hook Receipt 优先写入项目既有事件/审计机制；
 - 项目已有同类 Note 或决策目录时，优先复用并只增加 Schema/Adapter。
 
@@ -1357,7 +1357,7 @@ UI 是派生视图，不持有唯一真值。
 
 1. 当前仓库中哪些文件分别是需求、架构、决策、任务、实验和结论的 Canonical Source；
 2. 是否已有唯一 Worklog / Event Log，Hook Receipt 应接入哪里；
-3. `.project-memory/` 是否是合适根目录，还是应复用已有目录；
+3. `.note-skills/` 是否是合适根目录，还是应复用已有目录；
 4. 哪些 Decision 需要人类显式接受，接受证据采用什么格式；
 5. 哪些 Hook 在当前 Agent Runtime 中可以真正阻塞；
 6. Trigger 可读取哪些可信项目状态和事件；
@@ -1366,7 +1366,7 @@ UI 是派生视图，不持有唯一真值。
 9. MVP 试点项目、fixture 数据与跨会话验收方式；
 10. Promote 的目标映射、审批和回滚机制。
 
-这些问题未冻结前，可以继续完善 Proposed 文档与测试设计，但不应声称 Project Memory 已经成为可靠的项目基础设施。
+这些问题未冻结前，可以继续完善 Proposed 文档与测试设计，但不应声称 Note Skills 已经成为可靠的项目基础设施。
 
 ---
 
@@ -1400,12 +1400,12 @@ UI 是派生视图，不持有唯一真值。
 因此，本项目不应只实现一个“模型觉得有必要时才调用”的 Notes Skill，而应实现四个相互约束的层次：
 
 ```text
-Model-facing Project Memory Skill
+Model-facing Note Skills Skill
   + Mandatory Harness Hooks and Gates
-  + Searchable Project Memory Store
+  + Searchable Note Skills Store
   + Promote / Reconcile / Provenance lifecycle
 ```
 
-Project Memory 保存项目历史与未来意图；Canonical Source 保存项目当前真值。只有在这一边界稳定、Hook 可执行、Retrieval 能重新激活、Promote 不产生第二套真值、Reconcile 能发现漂移时，Agent 才真正具备与人一起工作数月的连续性。
+Note Skills 保存项目历史与未来意图；Canonical Source 保存项目当前真值。只有在这一边界稳定、Hook 可执行、Retrieval 能重新激活、Promote 不产生第二套真值、Reconcile 能发现漂移时，Agent 才真正具备与人一起工作数月的连续性。
 
 本文件当前是 **Proposed 架构基线**。它完成了设计讨论的结构化整理，但不构成实现完成、运行验证或生产可用性证明。

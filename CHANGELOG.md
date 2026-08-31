@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 - 2026-08-31
+
+- **Rebrand to Note Skills** (breaking): package name `pi-project-memory` → `note-skills`; tool name `project_memory` → `note_skills`; data directory `.project-memory` → `.note-skills`; skill/extension/design-doc paths renamed (`skills/project-memory/` → `skills/note-skills/`, `extensions/project-memory.ts` → `extensions/note-skills.ts`, `Project_Memory_Design.md` → `Note_Skills_Design.md`); all brand text updated. No behavior/invariant change — the signed v0.3.6 security model (triple binding, trusted scan, threat model §7) is unchanged. Tool name and data directory are breaking API changes; package was not yet published (npm 404), so no migration cost.
+
 ## 0.3.6 - 2026-08-31
 
 - Post-signing maintenance (from auditor suggestions): Phase 3 receipt verification upgraded from non-null readback to EXACT skipReceiptExists matching (envelope_id + candidate_id + tool_call_id + reason hash + resolved_at); merged+resolved captureAndResolvePending scenario fixed as a regression test (66 total). No signature-impacting logic change: same invariants as signed 14a6923 (v0.3.5).
@@ -75,7 +79,7 @@
 
 ## 0.2.1 - 2026-08-30
 
-- Promotion metadata hardening: persisted `promotion.target.path` is statically checked (non-absolute, no `..` escape, never inside `.project-memory`) before any write, and dynamically re-validated (project-relative, symlink-safe, existing) by `scan()` and `reconcile()` before backlink reads.
+- Promotion metadata hardening: persisted `promotion.target.path` is statically checked (non-absolute, no `..` escape, never inside `.note-skills`) before any write, and dynamically re-validated (project-relative, symlink-safe, existing) by `scan()` and `reconcile()` before backlink reads.
 - Runtime validation aligned with the JSON Schema for `created_by`, `source_refs` optional fields, promotion target structure, and nullable reason fields.
 - Stale canonical-conflict evidence is no longer applied at retrieval: `search()` and the extension only promote `needs_review` when `note_sha256` matches the current revision.
 - `resolvePendingCapture()` is now two-phase atomic: the entire candidate set is validated before any envelope is written, so a mixed valid/invalid request cannot half-succeed.
@@ -91,11 +95,11 @@
 - Per-note CAS write: `writeNoteFileCas()` enforces before-SHA-256 atomicity for every update and merge; `update()` and `mergeInto()` hold per-note locks.
 - Content-bound promote approval: `planPromotion()` builds exact approved after-bytes; `recordPromotionApproval()` writes a single-use `PromotionApprovalRecord`; `promote()` consumes the record inside approval + note + target triple locks.
 - Supersedes cycle fix: `superseded_by` is normalized to the same direction as `supersedes`; bidirectional metadata no longer produces a false `SUPERSES_CYCLE`.
-- Durable pending capture: `PendingCaptureEnvelope` is written to `.project-memory/pending/` at agent_end; candidates are resolved individually via `capture` or `acknowledge` with candidate IDs.
+- Durable pending capture: `PendingCaptureEnvelope` is written to `.note-skills/pending/` at agent_end; candidates are resolved individually via `capture` or `acknowledge` with candidate IDs.
 - Task-prompt relevance: `taskStartRetrieval()` accepts a `text` parameter and ranks active notes by prompt-term relevance using weighted field scoring.
 - Canonical conflict adapter: `canonical_conflicts` in the canonical state file produces `needs_review` hits without modifying the note's lifecycle status; `review_status` is a separate cross-cutting field.
 - Schema: `review_status` and `review_reason` added to `Note`, `validateNote`, and `note.schema.json`.
-- `package.json` `files` now includes `Project_Memory_Design.md`.
+- `package.json` `files` now includes `Note_Skills_Design.md`.
 
 ## 0.1.1 - 2026-08-29
 
@@ -106,6 +110,6 @@
 
 ## 0.1.0 - 2026-08-29
 
-- Add the initial filesystem-first Project Memory core.
-- Add the Pi extension bridge and model-facing `project-memory` skill.
+- Add the initial filesystem-first Note Skills core.
+- Add the Pi extension bridge and model-facing `note-skills` skill.
 - Add mandatory capture-gate reminders, trigger-based retrieval, promotion, reconciliation, and tests.

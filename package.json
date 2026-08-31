@@ -1,13 +1,13 @@
 {
-  "name": "pi-project-memory",
-  "version": "0.3.6",
-  "description": "Filesystem-first prospective project memory for Pi with capture gates, trigger-based retrieval, content-bound promotion approval, and reconciliation.",
+  "name": "note-skills",
+  "version": "0.4.0",
+  "description": "Filesystem-first prospective note skills for Pi with capture gates, trigger-based retrieval, content-bound promotion approval, and reconciliation.",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
     "agent-skill",
-    "project-memory",
+    "note-skills",
     "prospective-memory",
     "notes"
   ],
@@ -18,13 +18,13 @@
     "skills",
     "src",
     "README.md",
-    "Project_Memory_Design.md",
+    "Note_Skills_Design.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./extensions/project-memory.ts"
+      "./extensions/note-skills.ts"
     ],
     "skills": [
       "./skills"
@@ -35,7 +35,7 @@
     "test:core": "node --experimental-strip-types --test tests/core.test.ts",
     "test:extension": "node --experimental-strip-types --test tests/extension.test.ts",
     "typecheck": "tsc --noEmit",
-    "validate:skill": "python3 ~/.pi/agent/skills/task/skill-authoring/scripts/validate.py --strict skills/project-memory"
+    "validate:skill": "python3 ~/.pi/agent/skills/task/skill-authoring/scripts/validate.py --strict skills/note-skills"
   },
   "dependencies": {
     "yaml": "^2.8.1"

@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "project-memory/note.schema.json",
-  "title": "Project Memory Note",
-  "description": "Frontmatter schema for a Project Memory note (Markdown + YAML). Mirrors src/model.ts. Deterministic core: the runtime validator (validateNote) is authoritative; this file is the declarative contract for tooling and extension-side checks.",
+  "$id": "note-skills/note.schema.json",
+  "title": "Note Skills Note",
+  "description": "Frontmatter schema for a Note Skills note (Markdown + YAML). Mirrors src/model.ts. Deterministic core: the runtime validator (validateNote) is authoritative; this file is the declarative contract for tooling and extension-side checks.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -43,7 +43,7 @@
     "priority": { "enum": ["P0", "P1", "P2", "P3"] },
     "authority": {
       "const": "memory",
-      "description": "Notes stored in .project-memory always carry authority 'memory' (§7.2); canonical/source truth lives only in canonical sources."
+      "description": "Notes stored in .note-skills always carry authority 'memory' (§7.2); canonical/source truth lives only in canonical sources."
     },
     "review_status": { "enum": ["clear", "needs_review"] },
     "review_reason": { "type": ["string", "null"] },
