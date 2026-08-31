@@ -381,6 +381,41 @@ Hook 从讨论或执行事件中识别出的待判断信息。Candidate 在通�
 | 人类/项目治理 | 接受关键决策、批准 Promote、确认高风险冲突与科学权边界 | 依靠记忆手工维护所有派生索引 |
 | Worker Agent | 在授权范围内产生候选 Note 或 Result | 直接把 Note 提升为 Canonical Fact |
 
+### 6.3 与 Research Harness 的 Adapter Contract（可信边界契约）
+
+上游《超长程实验 Agent 技术方案》与 PRD 要求一个完整的 Research Control Plane（Research Event、materialized research state、ExperimentSpec/RunManifest、TaskSlice/Handoff、artifact hash、SQLite derived index 等）。Note Skills 不实现这些，它只在**可信适配边界**上消费对方提供的“事实”，绝不自己推断。
+
+#### 6.3.1 契约原则
+
+1. **单向信任**：Note Skills 只消费 Research Harness 提供的可信事实；Note Skills 产生的内容（Note、pending、approval、backlink）对 Harness 不可信，Harness 如需使用必须自带验证（如 promote target 的 content hash 回验）。
+2. **只消费、不推断**：canonical milestone 状态、canonical conflict 证据、研究实体 ID/版本——凡是 Note Skills 无法自行验证的事实，一律由 Harness 通过适配文件显式提供；缺失即未知（unevaluated/unresolved），绝不猜测。
+3. **文件是唯一通道**：Adapters 通过 `config.yaml` 的 `canonical_state_file`（最小原型）与后续约定的事件/实体文件传递；不做进程内 API 耦合。
+4. **版本/身份外部锚定**：研究实体的 stable entity ID 与 version 由 Harness 发放；Note Skills 不发明实体 ID，不把 Note ID 冒充研究实体 ID。
+5. **Promote 单向**：Note → canonical 的写入只走已批准的内容绑定 Promote（CAS + capability）；反向（canonical → Note）只能通过扫描/适配器以“needs_review”呈现，不得改写 Note 的权威状态。
+
+#### 6.3.2 最小契约接口（v0.4.0 已实现部分）
+
+`canonical_state_file`（YAML/JSON，项目内真实文件，symlink fail-closed）当前支持：
+
+| 契约字段 | 类型 | 消费方行为 |
+| --- | --- | --- |
+| `milestones.<key>` | string（状态值） | Trigger `kind: milestone` 求值；未知状态 → unresolved（不猜） |
+| `noteStatuses.<noteID>` | string | 覆盖 Note 的 status 判定（dependency trigger 依赖项状态） |
+| `canonical_conflicts.<noteID>` | `{canonical_ref, reason, observed_at?, note_sha256?}` | 检索/Trigger 时把该 Note 标记 `needs_review` + `canonical_conflict: true` |
+
+这是 Adapter Contract 的**最小原型**：Harness 只需写这个文件，Note Skills 即能对“里程碑完成”、“依赖状态变化”、“Note 与 canonical 冲突”做出确定的、可重验的反应。
+
+#### 6.3.3 明确不在本契约内（交由 Research Harness）
+
+- Research Event 流与 materialized research state/replay；
+- ExperimentSpec / RunManifest / immutable Run / artifact hash 的 schema 与事务；
+- TaskSlice / Handoff / worker attempt / 路径权限；
+- Definition revision / impact analysis / stale propagation；
+- SQLite 可重建结构化索引（PRD P0 要求）；
+- trace / sources / history / impact 研究级查询。
+
+本契约保持**窄而可靠**：Note Skills 可以接入更大的证据链，但永远不与 canonical research state 混同。
+
 ---
 
 ## 7. Note Skills 与 Source of Truth 的区分
