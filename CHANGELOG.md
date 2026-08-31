@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 - 2026-08-31
+
+- P1 (final signing): occurrence-level signal detection — `detectCaptureSignalsInBlocks()` now emits one signal per (type, marker, offset) occurrence, so two DISTINCT same-type durable units inside ONE message block (e.g. transition risk + plugin secret risk, both marked "风险") produce two candidates. Envelope identity binds block index + marker offset + block content hash; dedupe keys use candidate identity (not excerpt-only), so same-marker occurrences in short blocks stay distinct while re-scanning the same span stays idempotent.
+- P2: forged/untrusted pending resolutions are now RECOVERABLE — `resolvePendingCapture()` re-verifies a persisted resolution under the same trusted rules; invalid captured/skipped resolutions fall through so a legitimate new resolution can overwrite them instead of deadlocking the candidate with CONFLICT.
+- P2: custom secret regex guard extended to quantified alternation overlap `(a|aa)+$`, `(ab|a)+` (fixed literal-escape bug where the alternation pattern was never matched).
+- Tests: 57 -> 61 (same-block same-marker candidates, A-then-B same leaf, regex alternation, review_reason-only deletion, race/precheck no-side-effect).
+
 ## 0.3.1 - 2026-08-31
 
 - P1: on-disk pending resolutions are no longer trusted by themselves. `pendingCaptureCandidates()` re-verifies every `captured` resolution against the real Note (exists, same type, provenance referenced); forged/stale resolutions revert the candidate to unresolved (fail-closed against hand-edited pending JSON). `skipped` without a reason also reverts.

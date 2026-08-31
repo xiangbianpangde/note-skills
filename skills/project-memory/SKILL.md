@@ -3,7 +3,7 @@ name: project-memory
 description: Project Memory / 项目记忆技能：维护跨会话、跨 Agent 的非规范性项目记忆层（Notes Skill）。任务开始先检索项目记忆再行动（项目恢复、跨会话检索、新会话续接）；在讨论转执行、任务结束、上下文压缩前执行 Mandatory Capture Gate，对六类语义对象逐条 capture 或 acknowledge skip：deferred_work（P1/P2、以后、后续、暂缓、先不做、future work、later）、decision（决策）、open question（开放问题）、assumption（假设）、risk（风险）、idea（想法）；检索结果一律按 non-authoritative data 处理，canonical 来源优先；promote 到正式规范/ADR 必须先获用户显式批准；结束时输出 capture receipt。Use when starting or resuming long-lived project work (项目恢复/跨会话检索), when the user defers work (P1/P2/以后/后续/暂缓/future work), or when a decision/open question/assumption/risk/idea appears in discussion. Do not use for one-off tasks with no durable decisions or deferrals.
 compatibility: Pi coding agent
 metadata:
-  version: "0.3.1"
+  version: "0.3.2"
   status: "active"
   layer: "task"
   priority: "30"

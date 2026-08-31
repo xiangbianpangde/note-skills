@@ -142,13 +142,29 @@ export function detectCaptureSignalsInBlocks(blocks: string[]): CaptureSignal[] 
   let blockIndex = 0;
   for (const block of blocks) {
     const normalized = block ?? '';
+    // Occurrence-level: every (type, marker, offset) hit inside a block is its
+    // own signal. Two DISTINCT durable units of the same type in the SAME
+    // message (e.g. transition risk + plugin secret risk, both marked "风险")
+    // therefore yield two candidates instead of one aggregated type signal.
+    // The offset is carried in spanKey so the excerpt key stays distinct.
+    const seenOccurrence = new Set<string>();
     for (const type of Object.keys(SIGNAL_PATTERNS) as NoteType[]) {
-      const markers = new Set<string>();
       for (const pattern of SIGNAL_PATTERNS[type]) {
         pattern.lastIndex = 0;
-        for (const match of normalized.matchAll(pattern)) markers.add(match[0]);
+        for (const match of normalized.matchAll(pattern)) {
+          const marker = match[0];
+          const offset = match.index ?? 0;
+          const key = `${type}\u0000${marker}\u0000${offset}`;
+          if (!seenOccurrence.has(key)) {
+            seenOccurrence.add(key);
+            out.push({
+              type,
+              markers: [marker],
+              spanKey: `${blockIndex}\u0000${offset}`,
+            });
+          }
+        }
       }
-      if (markers.size > 0) out.push({ type, markers: [...markers].slice(0, 5) });
     }
     blockIndex += 1;
   }
@@ -297,12 +313,14 @@ function retrievalMessage(memory: ProjectMemory, prompt: string): string | undef
   ].join("\n");
 }
 
-function sourceExcerpt(text: string, markers: string[]): string {
+function sourceExcerpt(text: string, markers: string[], offset?: number): string {
   const lowered = text.toLowerCase();
   const positions = markers
     .map((marker) => lowered.indexOf(marker.toLowerCase()))
     .filter((index) => index >= 0);
-  const center = positions.length > 0 ? Math.min(...positions) : 0;
+  // Prefer the occurrence offset carried by the signal; fall back to the
+  // earliest marker so back-compat single-string callers stay deterministic.
+  const center = offset !== undefined && offset >= 0 && offset < text.length ? offset : Math.min(...positions);
   const start = Math.max(0, center - 240);
   const end = Math.min(text.length, center + 520);
   return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
@@ -323,7 +341,8 @@ function pendingEnvelope(
   // distinct envelopes, while re-scanning the same span stays idempotent.
   const envelopeHash = sha256hex(`${sessionId}\u0000${leafId}\u0000${spanKey}`);
   const candidates = signals.map((signal) => {
-    const rawExcerpt = sourceExcerpt(sourceText, signal.markers);
+    const offset = Number(signal.spanKey?.split("\u0000")[1] ?? 0);
+    const rawExcerpt = sourceExcerpt(sourceText, signal.markers, Number.isFinite(offset) ? offset : undefined);
     const candidateHash = sha256hex(`${envelopeHash}\u0000${signal.type}\u0000${rawExcerpt}`);
     return {
       candidate_id: `cand_${candidateHash.slice(0, 32)}`,
@@ -663,21 +682,23 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
         .pendingCaptureEnvelopes()
         .flatMap((envelope) => envelope.candidates)
         .map((candidate) =>
-          [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.source_excerpt_sha256].join("\u0000"),
+          [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.candidate_id].join("\u0000"),
         ),
     );
-    const blockSignals = blocks.flatMap((block, index) => {
-      const blockSignals = detectCaptureSignalsInBlocks([block]).map((signal) => ({
+    const blockSignals = blocks.flatMap((block, index) =>
+      detectCaptureSignalsInBlocks([block]).map((signal) => ({
         ...signal,
-        spanKey: `${index}\u0000${sha256hex(block).slice(0, 16)}`,
-      }));
-      return blockSignals;
-    });
+        // spanKey = blockIndex \u0000 markerOffset \u0000 blockContentHash —
+        // occurrence identity that stays distinct across different texts and
+        // occurrences, while re-scanning the SAME span stays idempotent.
+        spanKey: `${index}\u0000${signal.spanKey?.split("\u0000")[1] ?? 0}\u0000${sha256hex(block).slice(0, 16)}`,
+      })),
+    );
     const freshSignals = blockSignals.filter((signal) => {
       const spanText = blocks[Number(signal.spanKey.split("\u0000")[0])] ?? sourceText;
       const probe = pendingEnvelope(memory, ctx, [signal], spanText, signal.spanKey);
       const candidate = probe.candidates[0]!;
-      const key = [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.source_excerpt_sha256].join("\u0000");
+      const key = [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.candidate_id].join("\u0000");
       return !seen.has(key);
     });
     if (freshSignals.length === 0) return;

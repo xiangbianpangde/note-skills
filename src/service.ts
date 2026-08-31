@@ -1861,14 +1861,34 @@ export class ProjectMemory {
           if (!ids.includes(candidate.candidate_id)) continue
           found.add(candidate.candidate_id)
           if (candidate.resolution !== null) {
-            if (
-              candidate.resolution.tool_call_id === resolution.tool_call_id &&
-              candidate.resolution.status === resolution.status
-            ) {
-              resolved.push(candidate)
-              continue
+            // A persisted resolution is only authoritative if it re-verifies
+            // (same rule as pendingCaptureCandidates()). Forged/stale ones
+            // (captured -> nonexistent/wrong-type note, or skipped w/o reason)
+            // must be recoverable: a NEW legitimate resolution may overwrite.
+            const diskResolution = candidate.resolution
+            const resolutionTrusted =
+              (diskResolution.status === 'captured' &&
+                diskResolution.note_id !== null &&
+                (() => {
+                  const bound = this.read(diskResolution.note_id!)
+                  return (
+                    bound &&
+                    bound.note.type === candidate.type &&
+                    bound.note.source_refs.some((source) => sourceKey(source) === sourceKey(candidate.source_ref))
+                  )
+                })()) ||
+              (diskResolution.status === 'skipped' && !!diskResolution.reason?.trim())
+            if (resolutionTrusted) {
+              if (
+                diskResolution.tool_call_id === resolution.tool_call_id &&
+                diskResolution.status === resolution.status
+              ) {
+                resolved.push(candidate)
+                continue
+              }
+              throw new ProjectMemoryError('CONFLICT', `candidate ${candidate.candidate_id} is already resolved`)
             }
-            throw new ProjectMemoryError('CONFLICT', `candidate ${candidate.candidate_id} is already resolved`)
+            // Untrusted/forged: fall through and allow overwrite.
           }
           if (boundNote) {
             if (candidate.type !== boundNote.type)

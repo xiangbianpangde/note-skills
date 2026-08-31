@@ -224,16 +224,18 @@ export function assertSafeSecretPattern(src: string, label: string): void {
   } catch {
     throw new ProjectMemoryError('INCONSISTENT', `${label} is not a valid regular expression`)
   }
-  // Nested-quantifier ReDoS shapes, e.g. (a+)+, (a?){2,}, (.*)*, [a-z]+{2}:
-  // a quantifier token (incl. ?) directly followed (optionally across a
-  // closing paren/bracket) by another quantifier. Plain a+ / a? / (a|b)+ are
-  // fine. We conservatively reject the classic catastrophic constructions.
+  // Classic ReDoS constructions we reject (without trying to be a complete
+  // regex-safety oracle):
+  //   1. nested quantifiers: (a+)+, (a?){2,}, (.*)*, [a-z]+{2}
+  //   2. quantified alternation overlap: (a|aa)+$, (ab|a)+ — ambiguous
+  //      alternation under a quantifier is a well-known catastrophic shape.
   const hasNestedQuantifier =
     new RegExp(
       '(?:[+*?]|\\{\\d+(?:,\\d*)?\\})\\s*[)\\] ]?\\s*(?:[+*?]|\\{\\d+(?:,\\d*)?\\})',
     ).test(src)
-  if (hasNestedQuantifier)
-    throw new ProjectMemoryError('INCONSISTENT', `${label} contains nested quantifiers (ReDoS risk)`)
+  const hasQuantifiedAlternation = /\([^()]*\|[^()]*\)\s*[+*?]/.test(src)
+  if (hasNestedQuantifier || hasQuantifiedAlternation)
+    throw new ProjectMemoryError('INCONSISTENT', `${label} contains high-risk quantifier patterns (ReDoS risk)`)
 }
 
 export function readConfig(cwd: string): ConfigFile {

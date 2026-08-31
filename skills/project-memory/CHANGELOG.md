@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 - 2026-08-31
+
+- Same-type durable units inside one message now each get a candidate (occurrence-level detection with offset-based spans).
+- Forged pending resolutions are recoverable: a legitimate new resolution can overwrite an untrusted one.
+- Secret regex guard also rejects quantified alternation overlap; malformed patterns and bad config types fail closed.
+
 ## 0.3.1 - 2026-08-31
 
 - Pending resolutions are re-verified on read: forged/stale captured resolutions revert to unresolved (fail-closed).

@@ -1594,3 +1594,24 @@ test("capture committed but resolution conflicts: error exposes note_id and note
     assert.equal(memory.search({ type: "risk", includeTerminal: true }).length, beforeCount);
   }
 });
+
+test("review_reason-only deletion is quarantined (status stays clear)", () => {
+  const { memory } = fixture();
+  const captured = memory.capture(input("risk", "reason-only"));
+  const file = memory.read(captured.id)!;
+  const raw = JSON.parse(JSON.stringify(file.note)) as Record<string, unknown>;
+  raw.review_status = "clear";
+  delete raw.review_reason;
+  writeNoteFile(file.file, raw as never, file.body);
+  assert.equal(memory.read(captured.id), null);
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "SCHEMA" && /review_reason/.test(issue.message)));
+});
+
+test("(a|aa)+$ quantified alternation is rejected as dangerous", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pm-regex-alt-"));
+  expectCode(
+    () => new ProjectMemory(cwd).init({ project_id: "regex-alt", extra_secret_patterns: ["(a|aa)+$"] }),
+    "INCONSISTENT",
+  );
+});

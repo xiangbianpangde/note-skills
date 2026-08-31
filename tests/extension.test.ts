@@ -203,15 +203,16 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
   assert.equal((sent[0] as { customType: string }).customType, "project-memory-capture-gate");
   const pendingAfterCapture = new ProjectMemory(cwd).pendingCaptureCandidates();
   assert.ok(pendingAfterCapture.length >= 1);
-  // Resolve it via acknowledge with candidate_ids, then re-run agent_end with
-  // the SAME signal: no duplicate candidate should be persisted (dedup by
-  // type+markers+source leaf+excerpt hash).
+  // Resolve ALL candidates via acknowledge (the same signal may trigger
+  // several types), then re-run agent_end with the SAME signal: no duplicate
+  // candidate should be persisted (dedup per candidate identity).
+  const allPending = new ProjectMemory(cwd).pendingCaptureCandidates();
   await tools[0]!.execute(
     "call-ack" as never,
     {
       action: "acknowledge",
-      candidate_ids: [pendingAfterCapture[0]!.candidate_id],
-      skip_reason: "False positive marker in a quoted review",
+      candidate_ids: allPending.map((candidate) => candidate.candidate_id),
+      skip_reason: "False positive markers in a quoted review",
     } as never,
     new AbortController().signal as never,
     undefined as never,
@@ -219,7 +220,7 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
   );
   const beforeSecond = sent.length;
   events.get("agent_end")!({ messages: [{ role: "user", content: "P1 later" }] }, ctx as never);
-  assert.equal(sent.length, beforeSecond, "resolved candidate must not re-trigger the gate");
+  assert.equal(sent.length, beforeSecond, "resolved candidates must not re-trigger the gate");
   assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 0);
   const receipt = entries[0] as { type: string; data: { gate: string; tool_call_id: string; id: string } };
   assert.equal(receipt.type, "project-memory-receipt");
@@ -326,4 +327,70 @@ test("capture with candidate_ids binds across a leaf change (Core merges candida
   assert.equal(bound.resolved.length, 1);
   const note = memory.read(bound.receipt.id)!;
   assert.ok(note.note.source_refs.some((source) => source.turn_id === "leaf-A"), "candidate origin leaf must be preserved");
+});
+
+test("same block, same marker, two distinct same-type units yield two candidates", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-occ-"));
+  new ProjectMemory(cwd).init({ project_id: "extension-occ" });
+  const { events } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-occ", getLeafId: () => "leaf-occ" },
+  };
+  events.get("agent_end")!(
+    {
+      messages: [
+        {
+          role: "user",
+          content:
+            "风险 A：数据库迁移可能破坏兼容性。风险 B：新插件可能泄漏凭证。",
+        },
+      ],
+    },
+    ctx,
+  );
+  const riskCandidates = new ProjectMemory(cwd).pendingCaptureCandidates().filter((c) => c.type === "risk");
+  assert.ok(riskCandidates.length >= 2, `expected >=2 risk candidates in one block, got ${riskCandidates.length}`);
+  assert.notEqual(riskCandidates[0]!.candidate_id, riskCandidates[1]!.candidate_id, "two occurrences must be distinct candidates");
+});
+
+test("handled risk A then new risk B in same leaf still yields a B candidate", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-ab-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "extension-ab" });
+  const { tools, events } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-ab", getLeafId: () => "leaf-ab" },
+  };
+  // First agent_end produces risk A candidate.
+  events.get("agent_end")!({ messages: [{ role: "user", content: "风险 A：迁移问题。" }] }, ctx);
+  const first = new ProjectMemory(cwd).pendingCaptureCandidates().filter((c) => c.type === "risk")[0]!;
+  // Handle A by capturing it directly (without candidate_ids path) and then
+  // acknowledge the candidate so A is resolved.
+  await tools[0]!.execute(
+    "call-A" as never,
+    {
+      action: "capture",
+      candidate_ids: [first.candidate_id],
+      type: "risk",
+      title: "Risk A",
+      summary: "Migration risk A",
+      rationale: "A rationale",
+      next_action: "A next",
+      source_ref: "pi-session://session-ab",
+      source_turn_id: "leaf-ab",
+    } as never,
+    new AbortController().signal as never,
+    undefined as never,
+    ctx as never,
+  );
+  // Later, risk B appears in the SAME leaf.
+  events.get("agent_end")!({ messages: [{ role: "user", content: "风险 B：插件泄漏。" }] }, ctx);
+  const remaining = new ProjectMemory(cwd).pendingCaptureCandidates().filter((c) => c.type === "risk");
+  assert.ok(remaining.length >= 1, "risk B must still produce a candidate after A was handled");
 });
