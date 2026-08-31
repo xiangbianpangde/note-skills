@@ -10,15 +10,15 @@ The architecture baseline is documented in [`Note_Skills_Design.md`](Note_Skills
 
 ### correct memory 是什么
 
-“correct memory”并不是一个标准化的记忆分类，它描述的是一类 memory 系统的目标：把模型的历史记录整理、压缩、检索，然后针对当前任务把“正确、最新、可信、不冲突”的那条记忆注入上下文，让模型在同类问题上答案更一致。它的数据流向是：
+“correct memory”并不是一个标准化的记忆分类。本文用它指代一类以**历史检索 → 上下文注入 → 提高回答一致性**为主要目标的相关系统，可简称为 injection-oriented recall memory：把模型的历史记录整理、压缩、检索，然后针对当前任务把“正确、最新、可信、不冲突”的那条记忆注入上下文。它的数据流向是：
 
 ```text
 历史记录 → 整理/检索 → 注入上下文 → 减少同类问题错误率
 ```
 
-这是一类**增强型（injection）记忆系统**：记忆是知识库，系统的价值在于“从库里挑对东西喂回去”。代价是上下文持续被占用，且历史信息容易以“第二套真值”的姿态与当前事实竞争。
+这是一类**注入型（injection）记忆系统**：记忆是知识库，系统的价值在于“从库里挑对东西喂回去”。代价是激活时消耗上下文预算，且历史信息容易以“第二套真值”的姿态与当前事实竞争——但需注意：选择性注入的系统并不必然把历史常驻上下文，很多系统只在被激活时消耗 budget。
 
-### 本项目不是 memory 类项目
+### 本项目不是以 recall 为中心的注入型 memory
 
 Note Skills 的数据流向是相反的：
 
@@ -26,13 +26,13 @@ Note Skills 的数据流向是相反的：
 当前上下文 → 及时卸载 → Markdown 文件 → 按需拉回
 ```
 
-它要解决的不是“模型同类问题答错”，而是“超长程任务上信息失去工作状态”：已经定下来的决策、被推迟的工作、尚未验证的假设，随着上下文被压缩、截断或重建，从模型实际注意中淡出。本项目是**连续性层（continuity layer）**，是上下文的工作状态管理，不是记忆增强：
+它要解决的不是“模型同类问题答错”，而是“超长程任务上信息失去工作状态”：已经定下来的决策、被推迟的工作、尚未验证的假设，随着上下文被压缩、截断或重建，从模型实际注意中淡出。本项目是**以卸载和重激活为中心的连续性项目记忆层（continuity-oriented prospective project memory layer）**——它仍然是一种记忆载体，但非以历史知识注入和回答纠错为中心的 recall memory；更准确地说，它是超长程任务上**上下文的工作状态管理**：
 
-- 卸载发生在“讨论结束、任务执行、上下文压缩”等确定性时点，而非“模型记得保存”；
+- 卸载发生在“讨论结束、上下文压缩”等生命周期边界：Hook 确定性地执行候选检测，先把命中的候选持久化为可恢复的 pending；候选的语义裁决与 Note 创建仍由模型/用户完成；
 - 内容按语义对象（decision / deferred_work / open_question / …）组织，而不是会话纪要和历史回放；
-- 拉回由 Trigger（里程碑/依赖/日期）和可信检索触发，而不是把全部历史常驻窗口；
+- 拉回由 Trigger（里程碑/依赖）和可信检索触发，而不是把全部历史常驻窗口；
 - 权威始终在 canonical 侧：note 是 non-authoritative data，与正式真值冲突时以 canonical 为准；
-- 一切持久化状态按不可信默认处理（威胁模型 §7 的 fail-closed 设计）。
+- 一切持久化状态按不可信默认处理（§7 的 fail-closed 设计）。
 
 ### 超长程任务（long-horizon）为什么需要它
 
@@ -44,7 +44,7 @@ Note Skills 的数据流向是相反的：
 
 实验与开发项目的真实工作流是**时间碎片化超长程任务（temporal fragmented long-horizon task）**：工作点分散在真实时间中的多个会话、多个里程碑与多个执行者之间；单次任务可能不长，但任务之间存在天、周或月级间隔；当前实现、未来设想、尚未验证的假设和正式决策同时存在；模型和用户都会遗忘，且未来任务启动时未必知道应该检索什么。
 
-即使拥有超长上下文，信息仍可能**可见但不可激活**：原始对话或历史文件尚未丢失，但长期任务中当前代码、当前缺陷和当前验收目标占据更高注意力权重，历史决策无法被重新激活。这就是**注意力漂移（attention drift）**——不是模型变笨，而是重要信息仍在窗口里却不再被关注，或已经被逐出。典型失败模式：
+即使拥有超长上下文，信息仍可能**可见但不可激活**：原始对话或历史文件尚未丢失，但长期任务中当前代码、当前缺陷和当前验收目标占据更高注意力权重，历史决策无法被重新激活——这是**activation failure（仍可见但未被利用）**；另一类是信息已经因压缩、截断或重建被逐出窗口，根本不在可见范围内——这是**context loss（已被压缩/逐出）**。本项目把这两类统称为**注意力漂移（attention drift）**（工程性统称，不是学术术语）：不是模型变笨，而是重要信息失去了工作状态。典型失败模式：
 
 | 失败模式 | 表现 |
 | --- | --- |
@@ -54,7 +54,7 @@ Note Skills 的数据流向是相反的：
 | 旧信息污染 | 同时读到已过时方案和当前方案 |
 | 第二套真值 | Notes、规范、代码分别陈述不同的当前状态 |
 
-因此本项目用确定性机制（Capture Gate、Trigger、Promote、Reconcile）把“模型记得维护”升级为“系统必然维护”：模型负责语义判断，确定性 Core 负责信息是否有生命周期、何时重新出现、权威性如何、是否仍然有效。
+因此本项目用确定性机制（Capture Gate、Trigger、Promote、Reconcile）把“模型记得维护”升级为“系统必然执行生命周期检查并持久化已检测候选”：模型负责语义判断，确定性 Core 负责信息是否有生命周期、何时重新出现、权威性如何、是否仍然有效。长上下文提供的是“可见性”，不是“工作状态管理”——这正是本项目与“把上下文做长”方案的根本区别。
 
 
 ## Why a package, not only a prompt
@@ -97,6 +97,6 @@ Then initialize an opted-in project with the `note_skills` tool action `init` or
 
 ## MVP capability boundary
 
-Version 0.2.3 uses exact metadata filters, prompt-term relevance ranking, and trusted canonical-state triggers. It does not include embeddings, a graph database, a daemon, automatic scientific adjudication, or cross-project federation. Promote requires a content-bound single-use UI approval whose process-local capability is re-verified against the exact approved bytes before every canonical write; pending capture candidates persist durably under `.note-skills/pending/`.
+Version 0.4.0 uses exact metadata filters, prompt-term relevance ranking, and trusted canonical-state triggers. It does not include embeddings, a graph database, a daemon, automatic scientific adjudication, or cross-project federation. Promote requires a content-bound single-use UI approval whose process-local capability is re-verified against the exact approved bytes before every canonical write; pending capture candidates persist durably under `.note-skills/pending/`.
 
 **Trust boundary (recorded):** the Core API asserts but cannot prove that a live user confirmation occurred; the real UI gate (direct confirm dialog over exact target bytes) lives in the Pi Extension layer. Core pins the approval channel to `pi-ui` and requires a `pi-session://` principal, which prevents ad-hoc Core callers from minting approvals. If arbitrary in-process extensions belong to your threat model, treat Core callers as already trusted with user-level authority — the durable proof of "the user clicked confirm" is the extension's receipt record.
