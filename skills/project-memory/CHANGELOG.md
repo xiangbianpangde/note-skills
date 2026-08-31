@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 - 2026-08-31
+
+- Candidate settlement binds to the exact excerpt (source identity + excerpt hash); forged cross-settlement between same-type same-session candidates is reverted to unresolved.
+
 ## 0.3.2 - 2026-08-31
 
 - Same-type durable units inside one message now each get a candidate (occurrence-level detection with offset-based spans).

@@ -1798,7 +1798,7 @@ export class ProjectMemory {
           const bound =
             note &&
             note.note.type === candidate.type &&
-            note.note.source_refs.some((source) => sourceKey(source) === sourceKey(candidate.source_ref))
+            candidateBindsToNote(note.note, candidate)
           if (!bound) {
             // Forged/stale resolution: treat as unresolved and surface the
             // tamper by reporting the note in reconcile.
@@ -1847,12 +1847,12 @@ export class ProjectMemory {
       // Captured resolutions must bind to a REAL, this-project Note whose type
       // matches every candidate it claims. A candidate cannot be settled by an
       // unrelated or nonexistent note (P1: pending gate false settlement).
-      let boundNote: { id: string; type: NoteType; source_refs: SourceRef[] } | null = null
+      let boundNote: Note | null = null
       if (resolution.status === 'captured' && resolution.note_id) {
         const foundNote = this.read(resolution.note_id)
         if (!foundNote)
           throw new ProjectMemoryError('NOT_FOUND', `captured resolution references nonexistent note ${resolution.note_id}`)
-        boundNote = { id: foundNote.note.id, type: foundNote.note.type, source_refs: foundNote.note.source_refs }
+        boundNote = foundNote.note
       }
 
       for (const envelope of envelopes) {
@@ -1874,7 +1874,7 @@ export class ProjectMemory {
                   return (
                     bound &&
                     bound.note.type === candidate.type &&
-                    bound.note.source_refs.some((source) => sourceKey(source) === sourceKey(candidate.source_ref))
+                    candidateBindsToNote(bound.note, candidate)
                   )
                 })()) ||
               (diskResolution.status === 'skipped' && !!diskResolution.reason?.trim())
@@ -1896,12 +1896,10 @@ export class ProjectMemory {
                 'INVALID_INPUT',
                 `candidate ${candidate.candidate_id} (type ${candidate.type}) cannot be settled by note ${boundNote.id} (type ${boundNote.type})`,
               )
-            const candidateRef = [candidate.source_ref.kind, candidate.source_ref.ref, candidate.source_ref.turn_id ?? ''].join('\u0000')
-            const noteRefs = boundNote.source_refs.map((source) => sourceKey(source))
-            if (!noteRefs.includes(candidateRef)) {
+            if (!candidateBindsToNote(boundNote, candidate)) {
               throw new ProjectMemoryError(
                 'INVALID_INPUT',
-                `candidate ${candidate.candidate_id} provenance (${candidateRef}) is not referenced by note ${boundNote.id} — capture the candidate's source with the note or skip it`,
+                `candidate ${candidate.candidate_id} provenance/excerpt is not referenced by note ${boundNote.id} — capture the candidate's source with the note or skip it`,
               )
             }
           }
@@ -1976,14 +1974,23 @@ export class ProjectMemory {
     // not depend on the tool-call leaf matching the agent_end leaf (the
     // candidate origin is preserved even when the Pi leaf advanced between
     // detection and capture).
-    const candidateSources: { kind: SourceRef['kind']; ref: string; turn_id?: string; observed_at?: string }[] =
-      ids.map((id) => byId.get(id)!.source_ref)
-    const seenSource = new Set(input.source_refs.map((source) => sourceKey(source)))
+    const candidateSources: SourceRef[] = ids.map((id) => ({
+      ...byId.get(id)!.source_ref,
+      // Carry the candidate excerpt hash so the Note's source_ref binds to
+      // THIS candidate (sourceKey alone would allow cross-settlement between
+      // same-session candidates of the same type).
+      excerpt_sha256: byId.get(id)!.source_excerpt_sha256,
+    }))
+    // Dedupe only on the FULL identity (source key + excerpt): an input
+    // source_ref that shares the session/leaf but has a DIFFERENT excerpt
+    // must NOT suppress the candidate's excerpted source (the binding needs it).
+    const fullSourceKey = (source: SourceRef) => `${sourceKey(source)}\u0000${source.excerpt_sha256 ?? ''}`
+    const seenSource = new Set(input.source_refs.map((source) => fullSourceKey(source)))
     const mergedInput: CaptureInput = {
       ...input,
       source_refs: [
         ...input.source_refs,
-        ...candidateSources.filter((source) => !seenSource.has(sourceKey(source))),
+        ...candidateSources.filter((source) => !seenSource.has(fullSourceKey(source))),
       ],
     }
 
@@ -2431,6 +2438,23 @@ const MEMORY_ROOT_NAME = '.project-memory'
 
 function sourceKey(s: SourceRef): string {
   return [s.kind, s.ref, s.turn_id ?? ''].join('\u0000')
+}
+
+/**
+ * Full candidate-to-Note binding: a Note source_ref must match the candidate's
+ * source identity AND carry the candidate's excerpt hash. Without the excerpt
+ * check, two same-type candidates sharing one session+leaf (two distinct risks
+ * in one conversation) could be cross-settled by pointing B's forged
+ * resolution at A's Note — both would show the same sourceKey.
+ */
+function candidateBindsToNote(note: Note, candidate: PendingCaptureCandidate): boolean {
+  const candidateSourceKey = sourceKey(candidate.source_ref)
+  const candidateExcerpt = candidate.source_excerpt_sha256
+  return note.source_refs.some((source) => {
+    if (sourceKey(source) !== candidateSourceKey) return false
+    if (!candidateExcerpt) return true
+    return source.excerpt_sha256 === candidateExcerpt
+  })
 }
 
 function formatIssues(issues: { field?: string; message: string }[]): string {

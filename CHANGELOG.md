@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3 - 2026-08-31
+
+- P1 (fourth-audit cross-settlement): candidate-to-Note binding now requires BOTH the source identity AND the candidate's excerpt hash (`candidateBindsToNote`). Same-session same-type candidates can no longer be cross-settled by pointing a forged resolution at another candidate's Note. `captureAndResolvePending()` merges each candidate's `excerpt_sha256` into the Note source_refs so atomic binds satisfy the full identity; `pendingCaptureCandidates()` and `resolvePendingCapture()` re-verify with the same rule.
+- Tests: 61 -> 62 (cross-settlement forgery regression).
+
 ## 0.3.2 - 2026-08-31
 
 - P1 (final signing): occurrence-level signal detection — `detectCaptureSignalsInBlocks()` now emits one signal per (type, marker, offset) occurrence, so two DISTINCT same-type durable units inside ONE message block (e.g. transition risk + plugin secret risk, both marked "风险") produce two candidates. Envelope identity binds block index + marker offset + block content hash; dedupe keys use candidate identity (not excerpt-only), so same-marker occurrences in short blocks stay distinct while re-scanning the same span stays idempotent.

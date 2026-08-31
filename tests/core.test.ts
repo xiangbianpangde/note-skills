@@ -1567,7 +1567,7 @@ test("capture committed but resolution conflicts: error exposes note_id and note
     summary: "durable note",
     rationale: "x",
     next_action: "x",
-    source_refs: [{ kind: "conversation", ref: "pi-session://s-race", turn_id: "l-race" }],
+    source_refs: [{ kind: "conversation", ref: "pi-session://s-race", turn_id: "l-race", excerpt_sha256: "55".repeat(32) }],
   });
   memory.resolvePendingCapture([candId], { status: "captured", tool_call_id: "race-winner", note_id: note.id });
   // captureAndResolvePending pre-validates the candidate set BEFORE capture:
@@ -1614,4 +1614,69 @@ test("(a|aa)+$ quantified alternation is rejected as dangerous", () => {
     () => new ProjectMemory(cwd).init({ project_id: "regex-alt", extra_secret_patterns: ["(a|aa)+$"] }),
     "INCONSISTENT",
   );
+});
+
+test("cross-settlement forgery: candidate B cannot be settled by note A via hand-edited resolution", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  // Two same-type candidates, same session+leaf, distinct excerpts.
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`f3`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-x",
+    source_leaf_id: "l-x",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: `cand_${`11`.repeat(16)}`,
+        type: "risk",
+        markers: ["风险"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-x", turn_id: "l-x" },
+        source_excerpt: "...风险 A 迁移兼容性...",
+        source_excerpt_sha256: "2a".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+      {
+        candidate_id: `cand_${`33`.repeat(16)}`,
+        type: "risk",
+        markers: ["风险"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-x", turn_id: "l-x" },
+        source_excerpt: "...风险 B 插件凭证...",
+        source_excerpt_sha256: "4b".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // Capture A with ITS excerpt hash (atomic bind).
+  const boundA = memory.captureAndResolvePending(
+    [`cand_${`11`.repeat(16)}`],
+    {
+      type: "risk",
+      title: "Migrate compatibility",
+      summary: "A risk",
+      rationale: "x",
+      next_action: "x",
+      source_refs: [{ kind: "conversation", ref: "pi-session://s-x", turn_id: "l-x" }],
+    },
+    "xbind-a",
+  );
+  assert.equal(boundA.resolved.length, 1);
+  // Attack: hand-edit candidate B resolution to point at A's note.
+  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`f3`.repeat(16)}.json`);
+  const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
+    candidates: Array<{ candidate_id: string; resolution: unknown }>;
+  };
+  obj.candidates[1]!.resolution = {
+    status: "captured",
+    tool_call_id: "fake",
+    note_id: boundA.receipt.id,
+    resolved_at: now,
+  };
+  fs.writeFileSync(envFile, JSON.stringify(obj));
+  const remaining = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.equal(remaining.length, 1, "forged cross-settlement must revert B to unresolved");
+  assert.equal(remaining[0]!.candidate_id, `cand_${`33`.repeat(16)}`);
 });
