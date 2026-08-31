@@ -1778,10 +1778,40 @@ export class ProjectMemory {
     })
   }
 
+  /**
+   * Trusted pending candidates: a persisted resolution is NOT trusted on its
+   * own. A `captured` resolution must bind to a real, same-type Note that
+   * references the candidate provenance; otherwise the candidate is reported
+   * as unresolved again (fail-closed against hand-edited pending JSON).
+   */
   pendingCaptureCandidates(): PendingCaptureCandidate[] {
-    return this.pendingCaptureEnvelopes()
-      .flatMap((envelope) => envelope.candidates)
-      .filter((candidate) => candidate.resolution === null)
+    const out: PendingCaptureCandidate[] = []
+    for (const envelope of this.pendingCaptureEnvelopes()) {
+      for (const candidate of envelope.candidates) {
+        const resolution = candidate.resolution
+        if (resolution === null) {
+          out.push(candidate)
+          continue
+        }
+        if (resolution.status === 'captured' && resolution.note_id) {
+          const note = this.read(resolution.note_id)
+          const bound =
+            note &&
+            note.note.type === candidate.type &&
+            note.note.source_refs.some((source) => sourceKey(source) === sourceKey(candidate.source_ref))
+          if (!bound) {
+            // Forged/stale resolution: treat as unresolved and surface the
+            // tamper by reporting the note in reconcile.
+            out.push({ ...candidate, resolution: null })
+          }
+          continue
+        }
+        if (resolution.status === 'skipped' && !resolution.reason?.trim()) {
+          out.push({ ...candidate, resolution: null })
+        }
+      }
+    }
+    return out
   }
 
   resolvePendingCapture(
@@ -1921,8 +1951,24 @@ export class ProjectMemory {
         `captureAndResolvePending candidate type ${[...expectedTypes][0]} does not match capture type ${input.type}`,
       )
 
+    // Harness-derived provenance: every candidate's verified source_ref is
+    // merged into the Note's source_refs BEFORE capture, so the binding does
+    // not depend on the tool-call leaf matching the agent_end leaf (the
+    // candidate origin is preserved even when the Pi leaf advanced between
+    // detection and capture).
+    const candidateSources: { kind: SourceRef['kind']; ref: string; turn_id?: string; observed_at?: string }[] =
+      ids.map((id) => byId.get(id)!.source_ref)
+    const seenSource = new Set(input.source_refs.map((source) => sourceKey(source)))
+    const mergedInput: CaptureInput = {
+      ...input,
+      source_refs: [
+        ...input.source_refs,
+        ...candidateSources.filter((source) => !seenSource.has(sourceKey(source))),
+      ],
+    }
+
     // Capture first (creates/merges a Note inside the fingerprint lock).
-    const receipt = this.capture(input)
+    const receipt = this.capture(mergedInput)
     try {
       // Then bind the resolution under the pending lock. The candidate type
       // check above guarantees the Note type matches; verify existence and
@@ -2071,14 +2117,26 @@ export class ProjectMemory {
       arr.push(file)
       idGroups.set(note.id, arr)
     }
+    const duplicateIdSet = new Set<string>()
     for (const [id, files] of idGroups) {
-      if (files.length > 1)
+      if (files.length > 1) {
+        duplicateIdSet.add(id)
         issues.push({
           severity: 'error',
           code: 'DUPLICATE_ID',
           noteId: id,
           message: `id ${id} defined in ${files.length} files: ${files.join(', ')}`,
         })
+      }
+    }
+    // Mirror scan()'s trusted quarantine: entire duplicate-ID groups must NOT
+    // participate in index drift comparison or rebuild (a byte-identical
+    // duplicate would otherwise fold inside the id->sha Map and hide drift).
+    if (duplicateIdSet.size > 0) {
+      notes.splice(0, notes.length, ...notes.filter((entry) => !duplicateIdSet.has(entry.note.id)))
+      for (const [id] of byId) {
+        if (duplicateIdSet.has(id)) byId.delete(id)
+      }
     }
 
     // --- supersedes cycle (invariant 6) ---

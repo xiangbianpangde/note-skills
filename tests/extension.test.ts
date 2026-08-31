@@ -257,3 +257,73 @@ test("a successful capture suppresses the end-of-run duplicate gate", async () =
   assert.equal(promoteReceipt.data!.tool_call_id, "call-2");
   assert.equal(promoteReceipt.data!.mode, "replace_file");
 });
+
+test("agent_end yields per-block candidates: two distinct same-type risks get two candidates", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-blocks-"));
+  new ProjectMemory(cwd).init({ project_id: "extension-blocks" });
+  const { events, sent } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-blocks", getLeafId: () => "leaf-blocks" },
+  };
+  events.get("agent_end")!(
+    {
+      messages: [
+        { role: "user", content: "数据库迁移可能破坏兼容性，这是一个风险。" },
+        { role: "assistant", content: "好的。另外新插件可能泄漏凭证，这也是风险。" },
+      ],
+    },
+    ctx,
+  );
+  const pending = new ProjectMemory(cwd).pendingCaptureCandidates().filter((candidate) => candidate.type === "risk");
+  assert.ok(pending.length >= 2, `expected >=2 risk candidates, got ${pending.length}`);
+  assert.equal(sent.length, 1);
+});
+
+test("capture with candidate_ids binds across a leaf change (Core merges candidate provenance)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "project-memory-extension-leaf-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "extension-leaf" });
+  const now = new Date().toISOString();
+  const candId = `cand_${`d2`.repeat(16)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`e2`.repeat(16)}`,
+    project_id: "extension-leaf",
+    session_id: "session-leaf",
+    source_leaf_id: "leaf-A",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId,
+        type: "risk",
+        markers: ["risk"],
+        source_ref: { kind: "conversation", ref: "pi-session://session-leaf", turn_id: "leaf-A" },
+        source_excerpt: "leaf change risk",
+        source_excerpt_sha256: "f2".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // Capture reported from leaf-B: Core merges the candidate source (leaf-A)
+  // automatically into the Note, so binding succeeds even though the tool-call
+  // leaf differs from the detection leaf.
+  const bound = memory.captureAndResolvePending(
+    [candId],
+    {
+      type: "risk",
+      title: "Leaf change risk",
+      summary: "Bound across leaf change",
+      rationale: "x",
+      next_action: "x",
+      source_refs: [{ kind: "conversation", ref: "pi-session://session-leaf", turn_id: "leaf-B" }],
+    },
+    "leaf-call-1",
+  );
+  assert.equal(bound.resolved.length, 1);
+  const note = memory.read(bound.receipt.id)!;
+  assert.ok(note.note.source_refs.some((source) => source.turn_id === "leaf-A"), "candidate origin leaf must be preserved");
+});

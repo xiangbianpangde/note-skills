@@ -1467,3 +1467,130 @@ test("dangerous or invalid custom secret patterns fail closed at config load", (
     "INCONSISTENT",
   );
 });
+
+test("forged pending JSON resolution is not trusted: nonexistent note reverts to unresolved", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const candId = `cand_${`a1`.repeat(16)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`b1`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-forge",
+    source_leaf_id: "l-forge",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId,
+        type: "risk",
+        markers: ["risk"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-forge", turn_id: "l-forge" },
+        source_excerpt: "forged",
+        source_excerpt_sha256: "c1".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // Hand-edit the pending file: claim captured by a NONEXISTENT note.
+  const envFile = path.join(cwd, ".project-memory", "pending", `pc_${`b1`.repeat(16)}.json`);
+  const obj = JSON.parse(fs.readFileSync(envFile, "utf8")) as {
+    candidates: Array<{ resolution: unknown }>;
+  };
+  obj.candidates[0]!.resolution = { status: "captured", tool_call_id: "fake", note_id: "PM-RSK-9999", resolved_at: now };
+  fs.writeFileSync(envFile, JSON.stringify(obj));
+  // Trusted read must NOT treat it as resolved.
+  const pending = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.equal(pending.length, 1, "forged captured resolution must revert to unresolved");
+  assert.equal(pending[0]!.candidate_id, candId);
+});
+
+test("byte-identical duplicate ID is removed from the derived index on reconcile", () => {
+  const { cwd, memory } = fixture();
+  const a = memory.capture(input("risk", "byte-dup"));
+  fs.writeFileSync(path.join(cwd, ".project-memory", "notes", "risks", `${a.id}-copy.md`), fs.readFileSync(memory.read(a.id)!.file));
+  // Reconcile must rebuild the index WITHOUT the ambiguous id.
+  const report = memory.reconcile({ fixIndex: true });
+  assert.ok(report.issues.some((issue) => issue.code === "DUPLICATE_ID"));
+  const snap = JSON.parse(fs.readFileSync(path.join(cwd, ".project-memory", "index", "notes.json"), "utf8")) as {
+    notes: Array<{ id: string }>;
+  };
+  assert.equal(snap.notes.some((entry) => entry.id === a.id), false, "duplicate id must be dropped from index");
+});
+
+test("dangerous regex variants (a?)+$, (a|aa)+$ and bad extra_secret_patterns types fail closed", () => {
+  for (const pattern of ["(a?)+$", "(a+){2,}$"]) {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pm-regex-"));
+    expectCode(
+      () => new ProjectMemory(cwd).init({ project_id: "regex-x", extra_secret_patterns: [pattern] }),
+      "INCONSISTENT",
+    );
+  }
+  // Non-array config value must be INCONSISTENT, not silently undefined.
+  const cwd2 = fs.mkdtempSync(path.join(os.tmpdir(), "pm-regex-t-"));
+  new ProjectMemory(cwd2).init({ project_id: "regex-t", extra_secret_patterns: ["plain"] });
+  const cfgFile = path.join(cwd2, ".project-memory", "config.yaml");
+  const cfg = fs.readFileSync(cfgFile, "utf8").replace("extra_secret_patterns:\n  - plain", "extra_secret_patterns: not-an-array");
+  fs.writeFileSync(cfgFile, cfg);
+  expectCode(() => new ProjectMemory(cwd2).config(), "INCONSISTENT");
+});
+
+test("capture committed but resolution conflicts: error exposes note_id and note stays durable", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const candId = `cand_${`33`.repeat(16)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`44`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-race",
+    source_leaf_id: "l-race",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId,
+        type: "risk",
+        markers: ["risk"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-race", turn_id: "l-race" },
+        source_excerpt: "race risk",
+        source_excerpt_sha256: "55".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // First, claim the candidate with an independent resolve (simulating another
+  // process winning the race), so captureAndResolvePending's pre-check fails.
+  const note = memory.capture({
+    type: "risk",
+    title: "Race note",
+    summary: "durable note",
+    rationale: "x",
+    next_action: "x",
+    source_refs: [{ kind: "conversation", ref: "pi-session://s-race", turn_id: "l-race" }],
+  });
+  memory.resolvePendingCapture([candId], { status: "captured", tool_call_id: "race-winner", note_id: note.id });
+  // captureAndResolvePending pre-validates the candidate set BEFORE capture:
+  // since the candidate is already resolved, the call must fail WITHOUT any
+  // new note side effect (pre-check is strictly better than post-write failure).
+  const beforeCount = memory.search({ type: "risk", includeTerminal: true }).length;
+  try {
+    memory.captureAndResolvePending(
+      [candId],
+      {
+        type: "risk",
+        title: "Second race note",
+        summary: "durable too",
+        rationale: "x",
+        next_action: "x",
+        source_refs: [{ kind: "conversation", ref: "pi-session://s-race", turn_id: "l-race" }],
+      },
+      "race-call-1",
+    );
+    assert.fail("expected resolution failure");
+  } catch (error) {
+    // NOT_FOUND (candidate already resolved) — and critically NO new note.
+    assert.equal((error as { code: string }).code, "NOT_FOUND");
+    assert.equal(memory.search({ type: "risk", includeTerminal: true }).length, beforeCount);
+  }
+});

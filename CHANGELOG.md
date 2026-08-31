@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 - 2026-08-31
+
+- P1: on-disk pending resolutions are no longer trusted by themselves. `pendingCaptureCandidates()` re-verifies every `captured` resolution against the real Note (exists, same type, provenance referenced); forged/stale resolutions revert the candidate to unresolved (fail-closed against hand-edited pending JSON). `skipped` without a reason also reverts.
+- P1: per-block signal detection. `detectCaptureSignalsInBlocks()` runs per message block; two distinct same-type durable units yield two candidates instead of one aggregated type signal. Envelope identity is bound to the source span (block index + hash), so a later distinct unit gets a new envelope while re-scanning the same span stays idempotent.
+- P2: `captureAndResolvePending()` merges each candidate's verified source_ref into the Note BEFORE capture — binding does not depend on the tool-call leaf matching the agent_end leaf (Pi leaf may advance across the follow-up).
+- P2: duplicate-ID groups are removed from reconcile's local notes before index drift/rebuild, so byte-identical duplicates no longer hide drift and the ambiguous id is dropped from the derived index.
+- P2: custom secret pattern hardening extended: `?`-based nested quantifiers (`(a?)+$`) and `{m,n}` forms rejected; `extra_secret_patterns` present but not a string[] now throws `INCONSISTENT` instead of silently disabling the policy.
+- Tests: 51 -> 57 (forged pending resolution, byte-identical duplicate index, regex variants + config type, per-block candidates, leaf-change binding, race/no-side-effect pre-check).
+
 ## 0.3.0 - 2026-08-30
 
 - P1: Mandatory Capture Gate binding closed. New Core primitive `captureAndResolvePending(candidateIds, input, toolCallId)` creates/merges the Note and binds the candidate in one flow with type + provenance verification; `resolvePendingCapture()` now rejects nonexistent notes, wrong-type notes, and notes whose `source_refs` do not reference the candidate provenance. A risk candidate can no longer be settled by an unrelated idea note or a fabricated note ID.

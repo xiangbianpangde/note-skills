@@ -110,6 +110,8 @@ const Params = Type.Object({
 export interface CaptureSignal {
   type: NoteType;
   markers: string[];
+  /** Block identity (index \u0000 hash) so same-type units in different blocks stay distinct. */
+  spanKey?: string;
 }
 
 const SIGNAL_PATTERNS: Record<NoteType, RegExp[]> = {
@@ -124,18 +126,38 @@ const SIGNAL_PATTERNS: Record<NoteType, RegExp[]> = {
   idea: [/(?:想法|备选思路|可以考虑|潜在方案|idea|could consider)/gi],
 };
 
-/** Deterministic high-recall signal detector. It only requests a semantic gate; it never creates notes itself. */
-export function detectCaptureSignals(text: string): CaptureSignal[] {
+/**
+ * Deterministic high-recall signal detector. It only requests a semantic gate;
+ * it never creates notes itself.
+ *
+ * To preserve multiple durable semantic units of the SAME type, detection runs
+ * per message block (each user/assistant message is its own block) and per
+ * marker occurrence with a bounded lookaround span. A risk in message 1 and a
+ * DIFFERENT risk in message 3 therefore yield two candidates instead of one
+ * aggregated type signal. The excerpt key (type + markers + occurrence index +
+ * excerpt hash) keeps them distinguishable in the pending layer.
+ */
+export function detectCaptureSignalsInBlocks(blocks: string[]): CaptureSignal[] {
   const out: CaptureSignal[] = [];
-  for (const type of Object.keys(SIGNAL_PATTERNS) as NoteType[]) {
-    const markers = new Set<string>();
-    for (const pattern of SIGNAL_PATTERNS[type]) {
-      pattern.lastIndex = 0;
-      for (const match of text.matchAll(pattern)) markers.add(match[0]);
+  let blockIndex = 0;
+  for (const block of blocks) {
+    const normalized = block ?? '';
+    for (const type of Object.keys(SIGNAL_PATTERNS) as NoteType[]) {
+      const markers = new Set<string>();
+      for (const pattern of SIGNAL_PATTERNS[type]) {
+        pattern.lastIndex = 0;
+        for (const match of normalized.matchAll(pattern)) markers.add(match[0]);
+      }
+      if (markers.size > 0) out.push({ type, markers: [...markers].slice(0, 5) });
     }
-    if (markers.size > 0) out.push({ type, markers: [...markers].slice(0, 5) });
+    blockIndex += 1;
   }
   return out;
+}
+
+/** Back-compat single-string wrapper (tests keep calling detectCaptureSignals). */
+export function detectCaptureSignals(text: string): CaptureSignal[] {
+  return detectCaptureSignalsInBlocks([text]);
 }
 
 function hasConfig(cwd: string): boolean {
@@ -291,11 +313,15 @@ function pendingEnvelope(
   ctx: ExtensionContext,
   signals: CaptureSignal[],
   sourceText: string,
+  spanKey: string,
 ): PendingCaptureEnvelope {
   const sessionId = ctx.sessionManager.getSessionId();
   const leafId = ctx.sessionManager.getLeafId() ?? "unpersisted";
   const createdAt = new Date().toISOString();
-  const envelopeHash = sha256hex(`${sessionId}\u0000${leafId}\u0000${sourceText}`);
+  // Envelope identity is bound to the actual source span (block content), not
+  // only the leaf: distinct durable units later in the same conversation get
+  // distinct envelopes, while re-scanning the same span stays idempotent.
+  const envelopeHash = sha256hex(`${sessionId}\u0000${leafId}\u0000${spanKey}`);
   const candidates = signals.map((signal) => {
     const rawExcerpt = sourceExcerpt(sourceText, signal.markers);
     const candidateHash = sha256hex(`${envelopeHash}\u0000${signal.type}\u0000${rawExcerpt}`);
@@ -327,6 +353,11 @@ function pendingEnvelope(
 }
 
 function messageText(messages: unknown[]): string {
+  return messageBlocks(messages).join("\n");
+}
+
+/** Per-message text blocks: each user/assistant message is one block. */
+function messageBlocks(messages: unknown[]): string[] {
   const parts: string[] = [];
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
@@ -342,7 +373,7 @@ function messageText(messages: unknown[]): string {
       }
     }
   }
-  return parts.join("\n");
+  return parts;
 }
 
 function compactResult(value: unknown): string {
@@ -615,16 +646,18 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 
   pi.on("agent_end", (event, ctx) => {
     if (!hasConfig(ctx.cwd)) return;
-    const sourceText = messageText(event.messages);
-    const signals = detectCaptureSignals(sourceText);
+    const blocks = messageBlocks(event.messages);
+    const sourceText = blocks.join("\n");
+    // Per-block detection: each message contributes its own candidates, so two
+    // DISTINCT durable units of the same type (risk A then risk B) each get a
+    // candidate instead of one aggregated type signal.
+    const signals = detectCaptureSignalsInBlocks(blocks);
     if (signals.length === 0) return;
     const memory = new ProjectMemory(ctx.cwd);
-    // Deduplicate against candidates ALREADY persisted in this conversation
-    // (resolved OR still pending) by (type, markers, source leaf, excerpt
-    // hash). A successful capture never suppresses NEW signals that appear
-    // later in the same run — only the exact captured signals are considered
-    // handled. Persisted-but-unresolved candidates also stay handled so the
-    // follow-up gate message is not re-sent every agent_end.
+    // Deduplicate against candidates ALREADY persisted by (envelope span hash,
+    // type, markers, source leaf, excerpt hash). Distinct spans stay distinct;
+    // re-scanning the exact same span stays idempotent; a NEW signal later in
+    // the run is never suppressed by an earlier successful operation.
     const seen = new Set(
       memory
         .pendingCaptureEnvelopes()
@@ -633,26 +666,44 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.source_excerpt_sha256].join("\u0000"),
         ),
     );
-    const freshSignals = signals.filter((signal) => {
-      const probe = pendingEnvelope(memory, ctx, [signal], sourceText);
+    const blockSignals = blocks.flatMap((block, index) => {
+      const blockSignals = detectCaptureSignalsInBlocks([block]).map((signal) => ({
+        ...signal,
+        spanKey: `${index}\u0000${sha256hex(block).slice(0, 16)}`,
+      }));
+      return blockSignals;
+    });
+    const freshSignals = blockSignals.filter((signal) => {
+      const spanText = blocks[Number(signal.spanKey.split("\u0000")[0])] ?? sourceText;
+      const probe = pendingEnvelope(memory, ctx, [signal], spanText, signal.spanKey);
       const candidate = probe.candidates[0]!;
       const key = [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.source_excerpt_sha256].join("\u0000");
       return !seen.has(key);
     });
     if (freshSignals.length === 0) return;
-    const envelope = memory.persistPendingCapture(pendingEnvelope(memory, ctx, freshSignals, sourceText));
+    // Group fresh signals by spanKey so each span gets one envelope.
+    const bySpan = new Map<string, CaptureSignal[]>();
+    for (const signal of freshSignals) {
+      const list = bySpan.get(signal.spanKey) ?? [];
+      list.push(signal);
+      bySpan.set(signal.spanKey, list);
+    }
+    const persisted: string[] = [];
+    for (const [spanKey, signalsForSpan] of bySpan) {
+      const index = Number(spanKey.split("\u0000")[0]);
+      const spanText = blocks[index] ?? sourceText;
+      const envelope = memory.persistPendingCapture(pendingEnvelope(memory, ctx, signalsForSpan, spanText, spanKey));
+      persisted.push(...envelope.candidates.map((candidate) => candidate.candidate_id));
+    }
     pendingCandidates = refreshPending(memory);
     captureFollowUpActive = true;
     pi.appendEntry("project-memory-pending-capture", {
-      envelope_id: envelope.envelope_id,
-      project_id: envelope.project_id,
-      candidate_ids: envelope.candidates.map((candidate) => candidate.candidate_id),
-      source_refs: envelope.candidates.map((candidate) => candidate.source_ref),
-      at: envelope.created_at,
+      envelope_id: persisted[0] ?? "",
+      project_id: memory.config().project_id,
+      candidate_ids: persisted,
+      source_refs: [],
+      at: new Date().toISOString(),
     });
-    const summary = envelope.candidates
-      .map((candidate) => `${candidate.candidate_id} ${candidate.type}: ${candidate.markers.join(", ")}`)
-      .join("\n");
     pi.sendMessage(
       {
         customType: "project-memory-capture-gate",
@@ -662,10 +713,10 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           "Call project_memory capture with candidate_ids once per durable semantic unit, or project_memory acknowledge with candidate_ids and a concrete skip_reason.",
           "Every candidate remains durable under .project-memory/pending until explicitly resolved.",
           "Do not claim capture succeeded unless the tool returns a receipt.",
-          summary,
+          persisted.map((id) => id).join(", "),
         ].join("\n"),
         display: true,
-        details: { envelope },
+        details: { candidate_ids: persisted },
       },
       { deliverAs: "followUp", triggerTurn: true },
     );

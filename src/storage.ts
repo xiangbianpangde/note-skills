@@ -224,11 +224,14 @@ export function assertSafeSecretPattern(src: string, label: string): void {
   } catch {
     throw new ProjectMemoryError('INCONSISTENT', `${label} is not a valid regular expression`)
   }
-  // Nested-quantifier ReDoS shapes, e.g. (a+)+, (a+){2,}, (.*)*, [a-z]+{2}:
-  // a quantifier token directly followed (optionally across a closing paren/
-  // bracket) by another quantifier. Plain a+ / (a|b)+ are fine.
+  // Nested-quantifier ReDoS shapes, e.g. (a+)+, (a?){2,}, (.*)*, [a-z]+{2}:
+  // a quantifier token (incl. ?) directly followed (optionally across a
+  // closing paren/bracket) by another quantifier. Plain a+ / a? / (a|b)+ are
+  // fine. We conservatively reject the classic catastrophic constructions.
   const hasNestedQuantifier =
-    new RegExp('(?:[+*]|\\{\\d+(?:,\\d*)?\\})\\s*[)\\] ]?\\s*(?:[+*]|\\{\\d+(?:,\\d*)?\\})').test(src)
+    new RegExp(
+      '(?:[+*?]|\\{\\d+(?:,\\d*)?\\})\\s*[)\\] ]?\\s*(?:[+*?]|\\{\\d+(?:,\\d*)?\\})',
+    ).test(src)
   if (hasNestedQuantifier)
     throw new ProjectMemoryError('INCONSISTENT', `${label} contains nested quantifiers (ReDoS risk)`)
 }
@@ -269,12 +272,21 @@ export function readConfig(cwd: string): ConfigFile {
     schema_version: c.schema_version,
     project_id: c.project_id,
     created_at: typeof c.created_at === 'string' ? c.created_at : '',
-    extra_secret_patterns: Array.isArray(c.extra_secret_patterns)
-      ? c.extra_secret_patterns.filter((v): v is string => {
-          assertSafeSecretPattern(v, 'extra_secret_patterns')
-          return true
-        })
-      : undefined,
+    extra_secret_patterns:
+      c.extra_secret_patterns === undefined
+        ? undefined
+        : (() => {
+            if (!Array.isArray(c.extra_secret_patterns))
+              throw new ProjectMemoryError(
+                'INCONSISTENT',
+                'config.yaml extra_secret_patterns must be an array of strings (fail closed, not silently disabled)',
+                { file, extra_secret_patterns: c.extra_secret_patterns },
+              )
+            return c.extra_secret_patterns.filter((v): v is string => {
+              assertSafeSecretPattern(v, 'extra_secret_patterns')
+              return true
+            })
+          })(),
     canonical_state_file:
       typeof c.canonical_state_file === 'string' && c.canonical_state_file !== ''
         ? c.canonical_state_file

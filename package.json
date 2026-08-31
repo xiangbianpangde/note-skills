@@ -1,6 +1,6 @@
 {
   "name": "pi-project-memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Filesystem-first prospective project memory for Pi with capture gates, trigger-based retrieval, content-bound promotion approval, and reconciliation.",
   "type": "module",
   "keywords": [

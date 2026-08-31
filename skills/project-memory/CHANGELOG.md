@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 - 2026-08-31
+
+- Pending resolutions are re-verified on read: forged/stale captured resolutions revert to unresolved (fail-closed).
+- Per-block candidate detection: multiple distinct same-type durable units each get a candidate.
+- Capture with candidate_ids merges candidate provenance automatically; leaf changes across the follow-up no longer break binding.
+- Duplicate-ID groups drop out of the derived index on reconcile.
+- Custom secret regex hardening covers `?`-nested quantifiers; malformed config types fail closed.
+
 ## 0.3.0 - 2026-08-30
 
 - Candidate settlement is bound: capture with `candidate_ids` validates type match and that the note's source_refs reference the candidate provenance; unrelated or fabricated notes cannot settle a candidate.
