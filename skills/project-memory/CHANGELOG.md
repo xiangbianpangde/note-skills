@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.6 - 2026-08-31
+
+- Skip-receipt Phase 3 verification now matches exact receipt content; merged-path settle fixed as a regression test.
+
 ## 0.3.5 - 2026-08-31
 
 - Skip receipts are written project-safely and atomically with the envelope batch (no half-settle, no symlink escape).

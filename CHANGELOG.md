@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.6 - 2026-08-31
+
+- Post-signing maintenance (from auditor suggestions): Phase 3 receipt verification upgraded from non-null readback to EXACT skipReceiptExists matching (envelope_id + candidate_id + tool_call_id + reason hash + resolved_at); merged+resolved captureAndResolvePending scenario fixed as a regression test (66 total). No signature-impacting logic change: same invariants as signed 14a6923 (v0.3.5).
+
 ## 0.3.5 - 2026-08-31
 
 - P1 (audit #7): skip-receipt writes are project-contained (rejectSymlinkComponents before any write), atomic (writeFileAtomic + readback), and batched WITH the envelope mutations (one staged batch, unified rename) — a receipt write failure can no longer half-settle a multi-candidate skip or land a receipt outside the project via a planted symlink.

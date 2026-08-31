@@ -1985,12 +1985,16 @@ export class ProjectMemory {
         ...receiptMutations,
       ]
       commitPendingMutations(batch)
-      // Phase 3: verify receipts read back (never trust a silent partial write).
+      // Phase 3: verify receipts read back with EXACT match (never trust a
+      // silent partial or wrong-content write).
       for (const entry of skipReceiptEntries) {
-        const file = skipReceiptPath(this.cwd, entry.candidateId)
-        const after = tryReadText(file)
-        if (after === null)
-          throw new ProjectMemoryError('INTERNAL', `skip receipt missing after commit: ${file}`)
+        const ok = skipReceiptExists(this.cwd, entry.envelopeId, entry.candidateId, {
+          tool_call_id: entry.tool_call_id,
+          reason: entry.reason,
+          resolved_at: entry.resolved_at,
+        })
+        if (!ok)
+          throw new ProjectMemoryError('INTERNAL', `skip receipt mismatch after commit for ${entry.candidateId}`)
       }
       return resolved
     } finally {

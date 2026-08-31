@@ -1886,3 +1886,60 @@ test("skip receipt writes are project-contained and batch-atomic (symlink / dir 
   );
   assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 2, "batch must not half-settle");
 });
+
+test("captureAndResolvePending settles via the merged path (existing fingerprint note)", () => {
+  const { cwd, memory } = fixture();
+  const now = new Date().toISOString();
+  const candId = `cand_${`77`.repeat(16)}`;
+  memory.persistPendingCapture({
+    schema_version: 1,
+    envelope_id: `pc_${`88`.repeat(16)}`,
+    project_id: "fixture",
+    session_id: "s-merge",
+    source_leaf_id: "l-merge",
+    created_at: now,
+    candidates: [
+      {
+        candidate_id: candId,
+        type: "risk",
+        markers: ["风险"],
+        source_ref: { kind: "conversation", ref: "pi-session://s-merge", turn_id: "l-merge" },
+        source_excerpt: "merged risk",
+        source_excerpt_sha256: "99".repeat(32),
+        detected_at: now,
+        resolution: null,
+      },
+    ],
+  } satisfies Parameters<ProjectMemory["persistPendingCapture"]>[0]);
+  // Seed an existing note with the SAME fingerprint (title/summary) but a
+  // different source (no candidate binding yet).
+  memory.capture({
+    type: "risk",
+    title: "Merged risk",
+    summary: "Merged summary",
+    rationale: "x",
+    next_action: "x",
+    source_refs: [{ kind: "conversation", ref: "pi-session://s-merge", turn_id: "l-merge" }],
+  });
+  // Atomic bind now hits the merge path.
+  const bound = memory.captureAndResolvePending(
+    [candId],
+    {
+      type: "risk",
+      title: "Merged risk",
+      summary: "Merged summary",
+      rationale: "x",
+      next_action: "x",
+      source_refs: [{ kind: "conversation", ref: "pi-session://s-merge", turn_id: "l-merge" }],
+    },
+    "merge-bind-call",
+  );
+  assert.equal(bound.receipt.status, "merged");
+  assert.equal(bound.resolved.length, 1);
+  assert.equal(new ProjectMemory(cwd).pendingCaptureCandidates().length, 0);
+  const note = memory.read(bound.receipt.id)!;
+  assert.ok(
+    note.note.source_refs.some((source) => source.candidate_id === candId && source.excerpt_sha256 === "99".repeat(32)),
+    "merged note must carry the candidate-bound source",
+  );
+});
