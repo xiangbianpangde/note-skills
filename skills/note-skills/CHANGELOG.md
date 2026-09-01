@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 - 2026-09-01
+
+- Fix exponential capture-gate loop: content-identity dedup (type + excerpt sha256, stable across re-scans — candidate_id position drift was re-emitting same excerpts) + same-sentence multi-marker merge (one sentence = one candidate; distinct same-type sentences stay distinct). Regression tests: cross-round dedup + two-distinct-risks preserved (69 total).
+
 ## 0.4.1 - 2026-08-31
 
 - Fix same-source capture gate infinite loop: gate-noise blocks (gate message, assistant acknowledge reports, meta-discourse) are excluded from agent_end signal detection; real semantics survive. Regression tests added (68 total).

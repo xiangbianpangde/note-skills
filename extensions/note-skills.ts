@@ -435,6 +435,23 @@ function isGateMetaDiscourse(content: string): boolean {
   return false;
 }
 
+/** Sentence-level span around an offset (split on 。！？!?\n). */
+function sentenceAround(text: string, offset: number): string {
+  const clamped = Math.max(0, Math.min(offset, Math.max(0, text.length - 1)));
+  const start = Math.max(
+    text.lastIndexOf("。", clamped),
+    text.lastIndexOf("！", clamped),
+    text.lastIndexOf("？", clamped),
+    text.lastIndexOf("!", clamped),
+    text.lastIndexOf("?", clamped),
+    text.lastIndexOf("\n", clamped),
+  ) + 1;
+  const ends = [text.indexOf("。", clamped), text.indexOf("！", clamped), text.indexOf("？", clamped), text.indexOf("!", clamped), text.indexOf("?", clamped), text.indexOf("\n", clamped)]
+    .filter((i) => i >= 0);
+  const end = ends.length ? Math.min(...ends) : text.length;
+  return text.slice(start, end).trim();
+}
+
 /** Blocks that are eligible for capture-signal scanning. */
 function captureEligibleBlocks(blocks: MessageBlock[]): { index: number; block: MessageBlock }[] {
   const out: { index: number; block: MessageBlock }[] = [];
@@ -737,32 +754,59 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
       })),
     );
     if (blockSignals.length === 0) return;
-    // Deduplicate against candidates ALREADY persisted by (envelope span hash,
-    // type, markers, source leaf, excerpt hash). Distinct spans stay distinct;
-    // re-scanning the exact same span stays idempotent; a NEW signal later in
-    // the run is never suppressed by an earlier successful operation.
+    // Deduplicate against candidates ALREADY persisted by CONTENT identity
+    // (type + excerpt hash), NOT by candidate_id/position: candidate_id is
+    // derived from spanKey which contains blockIndex — the same source text
+    // re-scanned in a later agent_end sits at a different block index, so a
+    // position-based key never matches and every re-scan re-emits the same
+    // excerpt as a "fresh" candidate (root cause of the 182-envelope loop:
+    // same excerpt persisted up to ~9 times). Content identity is stable
+    // across re-scans: same type + same excerpt sha256 => same durable unit,
+    // regardless of where it sits in the window.
     const seen = new Set(
       memory
         .pendingCaptureEnvelopes()
         .flatMap((envelope) => envelope.candidates)
-        .map((candidate) =>
-          [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.candidate_id].join("\u0000"),
-        ),
+        .map((candidate) => [candidate.type, candidate.source_excerpt_sha256].join("\u0000")),
     );
     const freshSignals = blockSignals.filter((signal) => {
       const spanText = blocks[Number(signal.spanKey.split("\u0000")[0])]?.content ?? sourceText;
       const probe = pendingEnvelope(memory, ctx, [signal], spanText, signal.spanKey);
       const candidate = probe.candidates[0]!;
-      const key = [candidate.type, candidate.markers.join("\u0000"), candidate.source_ref.turn_id ?? "", candidate.candidate_id].join("\u0000");
+      const key = [candidate.type, candidate.source_excerpt_sha256].join("\u0000");
       return !seen.has(key);
     });
     if (freshSignals.length === 0) return;
+    // Same-block same-excerpt merge: multiple markers inside ONE block can hit
+    // the SAME semantic unit ("P1-B Contract 已确认冻结（rev11），后续需要跟进
+    // P1-C" yields 后续 / P1 / P1 markers that all describe the ONE "P1-C 需要
+    // 跟进" unit). Merge key = (blockIndex, type, sentence-slice at marker):
+    // a sentence-level span (split on 。！？\n) differs between DISTINCT units
+    // (风险 A→ 句子 1, 风险 B→ 句子 2) while collapsing markers inside one
+    // sentence (P1-B 案例). This keeps "two distinct same-type risks in one
+    // block => two candidates" intact and fixes the 3-candidates-per-sentence
+    // field report.
+    const mergedSignals: CaptureSignal[] = [];
+    const mergedKeys = new Set<string>();
+    const spansForSignals: Array<{ signal: CaptureSignal; spanKey: string }> = [];
+    for (const signal of freshSignals) {
+      const index = Number(signal.spanKey?.split("\u0000")[0] ?? 0);
+      const spanText = blocks[index]?.content ?? sourceText;
+      const offset = Number(signal.spanKey?.split("\u0000")[1] ?? 0);
+      const sentence = sentenceAround(spanText, offset);
+      const contentKey = `${index}\u0000${signal.type}\u0000${sha256hex(sentence).slice(0, 32)}`;
+      if (mergedKeys.has(contentKey)) continue;
+      mergedKeys.add(contentKey);
+      mergedSignals.push(signal);
+      spansForSignals.push({ signal, spanKey: signal.spanKey ?? "" });
+    }
+    if (mergedSignals.length === 0) return;
     // Group fresh signals by spanKey so each span gets one envelope.
     const bySpan = new Map<string, CaptureSignal[]>();
-    for (const signal of freshSignals) {
-      const list = bySpan.get(signal.spanKey) ?? [];
+    for (const { signal, spanKey } of spansForSignals) {
+      const list = bySpan.get(spanKey) ?? [];
       list.push(signal);
-      bySpan.set(signal.spanKey, list);
+      bySpan.set(spanKey, list);
     }
     const persisted: string[] = [];
     for (const [spanKey, signalsForSpan] of bySpan) {

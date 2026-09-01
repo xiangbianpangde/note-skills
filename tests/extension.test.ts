@@ -25,6 +25,39 @@ test("capture signal detector ignores routine execution and untrusted external i
   );
 });
 
+test("same content re-scanned across agent_end rounds is NOT re-emitted (content dedup)", () => {
+  // Field report (researchctl): the same excerpt persisted up to ~9 times —
+  // candidate_id is derived from spanKey (blockIndex), so a later agent_end
+  // re-scanning the same source text at a different block position produced a
+  // NEW candidate_id and CON CIX dedup key won, never matching. Content-identity
+  // dedup (type + excerpt sha256) must be stable across re-scans.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-content-dedup-"));
+  new ProjectMemory(cwd).init({ project_id: "content-dedup" });
+  const { events } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-dedup", getLeafId: () => "leaf-dedup" },
+  };
+  const userMsg = { role: "user", content: "P1-B Contract 已确认冻结（rev11），后续需要跟进 P1-C。" };
+  // Round 1: emit candidate.
+  events.get("agent_end")!({ messages: [userMsg, { role: "assistant", content: "好的。" }] }, ctx);
+  const after1 = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.ok(after1.length >= 1);
+  // Round 2: the SOME text appears again with different surrounding messages
+  // (block index shifts) — must NOT produce a new candidate with the same excerpt.
+  events.get("agent_end")!(
+    { messages: [{ role: "assistant", content: "运行测试。" }, userMsg, { role: "assistant", content: "继续。" }] },
+    ctx,
+  );
+  const after2 = new ProjectMemory(cwd).pendingCaptureCandidates();
+  const excerpts = after2.map((c) => c.source_excerpt);
+  // No duplicate of the P1-B excerpt across rounds.
+  const p1bCount = excerpts.filter((e) => /P1-B Contract/.test(e)).length;
+  assert.equal(p1bCount, 1, `P1-B excerpt persisted ${p1bCount} times (expected 1)`);
+});
+
 test("gate meta-discourse does not self-capture (same-source loop regression)", () => {
   // Same-source infinite loop (reported): an assistant reply that ONLY reports
   // handling the gate must not re-capture itself as new candidates.

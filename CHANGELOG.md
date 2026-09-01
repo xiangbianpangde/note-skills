@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 - 2026-09-01
+
+- **Fix exponential capture-gate loop (reported from researchctl, 182 envelopes / 56 unresolved)**: two root causes in the agent_end signal pipeline:
+  1. **Cross-round content dedup**: `candidate_id` was derived from `spanKey` (blockIndex + offset + contentHash), so the same source text re-scanned in a later agent_end sits at a different block index → new candidate_id → the old position-based dedup key never matched → every re-scan re-emitted the same excerpt as a "fresh" candidate (same excerpt persisted up to ~9 times). Dedup key is now CONTENT identity (type + `source_excerpt_sha256`), stable across re-scans regardless of window position.
+  2. **Same-sentence multi-marker merge**: one sentence can hit multiple markers ("P1-B Contract 已确认冻结（rev11），后续需要跟进 P1-C" hits 后续 / P1 / P1) that describe the SAME durable unit → 3 candidates for one unit. New `sentenceAround()` merge key (blockIndex + type + sentence slice) collapses same-sentence hits into one candidate while preserving DISTINCT same-type units in different sentences (风险 A + 风险 B still yield two candidates).
+- Regression tests: cross-round content dedup (same excerpt re-scanned → 1) + existing same-block two-distinct-risks preserved (68 → 69).
+
 ## 0.4.1 - 2026-08-31
 
 - **Fix same-source capture gate infinite loop** (reported from researchctl project): the agent_end capture scan now suppresses gate-noise blocks before signal detection: (1) the `[Note Skills Mandatory Capture Gate]` message itself; (2) assistant replies that only report handling the gate ("已 acknowledge…待决项清零", skip/receipt bookkeeping) — these self-referential meta-discourses previously re-captured themselves as new candidates, consuming ~200 candidates in the field; (3) short blocks dominated by gate vocabulary. Real semantics inside a gate-handling reply (e.g. "合同冻结是实现完成后的里程碑") are preserved. Same-source loop regression tests: strict zero-candidate meta-reply + real-semantics-survive (68 total).
