@@ -25,6 +25,43 @@ test("capture signal detector ignores routine execution and untrusted external i
   );
 });
 
+test("receipt-shaped echo text is not re-captured (echo amplification regression)", () => {
+  // PM-DEF-0009: the model's detailed capture/acknowledge receipt (candidate-id
+  // tables, skip reasons, type lists) was re-scanned by the next gate and
+  // produced up to 8 candidates from the SAME receipt text via different type
+  // rules — zero new semantics. Any block containing candidate-id hashes is an
+  // echo, not a durable unit.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-echo-regression-"));
+  new ProjectMemory(cwd).init({ project_id: "echo-regression" });
+  const { events } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-echo", getLeafId: () => "leaf-echo" },
+  };
+  // Receipt-shaped assistant reply quoting candidate ids + tables (long, >40 words).
+  events.get("agent_end")!(
+    {
+      messages: [
+        {
+          role: "assistant",
+          content:
+            "acknowledge 完成：\n" +
+            "cand_89d88cc7dbdf3583cc25c91bf2b75848 - skipped（重复，无独立语义）\n" +
+            "cand_2d58b6ceeacebaa9130fec8f4820550f - skipped（占位）\n" +
+            "cand_eb5cdf6536db1ec8b5d752d816396ba9 - captured → PM-DEF-0003\n" +
+            "cand_f757dfe50ec7df48fa6e337bc62ba9b6 - skipped（同源）\n" +
+            "剩余 4 个候选待处理，receipt 已记录，门禁通过。",
+        },
+      ],
+    },
+    ctx,
+  );
+  const candidates = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.equal(candidates.length, 0, `receipt echo must not produce candidates (got ${candidates.length})`);
+});
+
 test("same content re-scanned across agent_end rounds is NOT re-emitted (content dedup)", () => {
   // Field report (researchctl): the same excerpt persisted up to ~9 times —
   // candidate_id is derived from spanKey (blockIndex), so a later agent_end

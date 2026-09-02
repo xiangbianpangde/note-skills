@@ -1337,7 +1337,17 @@ export class ProjectMemory {
           const scored = scoreTaskRelevance(hit, terms)
           return { ...hit, relevanceScore: scored.score, relevanceTerms: scored.terms }
         })
-        .filter((hit) => (hit.relevanceScore ?? 0) > 0)
+        // Minimum-match gate: at least TWO distinct prompt terms must hit a
+        // note (or the score from a single high-weight title/next_action hit
+        // must be strong) before the note is injected. A single broad term
+        // (e.g. only 模型 after stop-word filtering — which now includes it)
+        // must not pull unrelated notes into the context (field report:
+        // '为什么我的 pi coding agent 的 b-ai 的模型无法使用？' matched 6
+        // unrelated notes via 模型/使用 alone).
+        .filter((hit) => {
+          const unique = new Set(hit.relevanceTerms ?? []).size
+          return (hit.relevanceScore ?? 0) >= 6 || unique >= 2
+        })
         .sort(
           (left, right) =>
             (right.relevanceScore ?? 0) - (left.relevanceScore ?? 0) ||
@@ -3091,7 +3101,22 @@ function validatePendingEnvelope(envelope: PendingCaptureEnvelope, projectId: st
 const TASK_STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'into', 'this', 'that', 'task', 'start', 'please',
   '一个', '这个', '那个', '这些', '那些', '进行', '开始', '处理', '项目',
+  // Broad/generic terms that appear in almost every technical prompt and must
+  // not alone drive retrieval injection (field report: '为什么我的 pi coding
+  // agent 的 b-ai 的模型无法使用？' matched 6 unrelated notes via 模型/使用).
+  '为什么', '怎么', '什么', '我的', '你的', '哪个', '哪里', '能否', '如何', '可以', '不能',
+  '是否', '就是', '不是', '没有', '这个', '那个', '一个', '一些', '这么', '那样',
+  '模型', '使用', '无法', '还是', '现在', '目前', '已经', '需要',
+  '系统', '功能', '问题', '情况', '时候', '但是', '因为', '所以', '如果',
 ])
+
+/**
+ * Generic two-char substrings that must never be treated as a retrieval term,
+ * even when they appear inside a longer Chinese token split into bigrams
+ * (e.g. token 无法使用 -> bigrams 无法/法使/使用; 使用 must not survive).
+ */
+const GENERIC_TERM_PARTS = new Set(['模型', '使用', '无法', '什么', '我的', '怎么', '这个', '那个', '进行', '开始', '需要', '问题', '功能', '系统', '情况', '是否', '可以'])
+
 
 function lexicalTerms(text: string): string[] {
   const normalized = text.normalize('NFKC').toLowerCase()
@@ -3101,8 +3126,16 @@ function lexicalTerms(text: string): string[] {
     if (TASK_STOP_WORDS.has(token)) continue
     if (/\p{Script=Han}/u.test(token)) {
       const chars = [...token].filter((char) => /\p{Script=Han}/u.test(char))
-      if (chars.length <= 2) terms.add(chars.join(''))
-      else for (let index = 0; index < chars.length - 1; index++) terms.add(chars.slice(index, index + 2).join(''))
+      if (chars.length <= 2) {
+        if (!TASK_STOP_WORDS.has(chars.join(''))) terms.add(chars.join(''))
+      } else {
+        for (let index = 0; index < chars.length - 1; index++) {
+          const pair = chars.slice(index, index + 2).join('')
+          // Broad/generic bigram (模型/使用/无法/什么/我的...) must not
+          // survive the bigram split and drive retrieval injection.
+          if (!TASK_STOP_WORDS.has(pair) && !GENERIC_TERM_PARTS.has(pair)) terms.add(pair)
+        }
+      }
     } else if (token.length >= 2) {
       terms.add(token)
     }

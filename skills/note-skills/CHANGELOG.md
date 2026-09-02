@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3 - 2026-09-02
+
+- Fix receipt echo-amplification loop (PM-DEF-0009): receipt-shaped text (cand_ id tables, skip reasons) is excluded from agent_end scanning; retrieval noise fix: broad generic terms (模型/使用/为什么...) no longer drive injection + minimum-match gate (≥2 distinct terms or strong single hit). Regression tests: receipt-echo zero candidates + broad-prompt no-injection (69→71).
+
 ## 0.4.2 - 2026-09-01
 
 - Fix exponential capture-gate loop: content-identity dedup (type + excerpt sha256, stable across re-scans — candidate_id position drift was re-emitting same excerpts) + same-sentence multi-marker merge (one sentence = one candidate; distinct same-type sentences stay distinct). Regression tests: cross-round dedup + two-distinct-risks preserved (69 total).

@@ -423,14 +423,22 @@ function isGateMetaDiscourse(content: string): boolean {
   if (!trimmed) return true;
   // 1) The gate announcement itself.
   if (trimmed.startsWith("[Note Skills Mandatory Capture Gate]")) return true;
-  // 2) Meta-discourse about handling the gate: report lines, not semantics.
-  const metaFreq = (trimmed.match(
-    /已\s*acknowledge|待决项|候选|捕获|清理|settled|skip(?:ped)?\s*[:：]?|receipt|门禁|清零|candidate|acknowledge|semantic gate|pending capture|待解决|注：|备注：/gi,
+  // 1b) Receipt-shaped text: a detailed capture/acknowledge receipt quoting
+  // candidate ids (cand_<32hex>), skip reasons, type lists. The model writes
+  // these to satisfy the gate; re-scanning them (echo amplification loop,
+  // PM-DEF-0009) produced up to 8 candidates from the SAME receipt text across
+  // different type rules. Any block containing candidate-id hashes is a
+  // receipt/echo, not a new durable unit — even when long.
+  if (/cand_[0-9a-f]{32}/i.test(trimmed)) return true;
+  // 1c) Gate vocabulary density without length cap: a block dominated by
+  // gate/receipt words is meta even when it exceeds the short-block rule.
+  const dense = (trimmed.match(
+    /已\s*acknowledge|待决项|候选|捕获|清理|settled|skip(?:ped)?\s*[:：]?|receipt|门禁|清零|candidate|acknowledge|semantic gate|pending capture|待解决/g,
   ) ?? []).length;
-  // If the block is short and majority gate-vocabulary, treat as meta.
+  const candidateLines = (trimmed.match(/cand_[0-9a-f]{32}/gi) ?? []).length;
   const words = trimmed.split(/\s+/).length;
-  if (words <= 40 && metaFreq >= 2) return true;
-  // 3) Pure bookkeeping shapes like "已 acknowledge（skipped @...）待决项清零"
+  if (candidateLines >= 2 || (words <= 40 && dense >= 2)) return true;
+  // 2) Pure bookkeeping shapes like "已 acknowledge（skipped @...）待决项清零"
   if (/^[^\n]*已\s*acknowledge/.test(trimmed) && /待决项|候选/.test(trimmed)) return true;
   return false;
 }

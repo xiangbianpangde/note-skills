@@ -1,6 +1,6 @@
 {
   "name": "note-skills",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Filesystem-first prospective note skills for Pi with capture gates, trigger-based retrieval, content-bound promotion approval, and reconciliation.",
   "type": "module",
   "keywords": [

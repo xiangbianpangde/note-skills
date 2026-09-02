@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.3 - 2026-09-02
+
+- **Fix receipt echo-amplification loop (PM-DEF-0009)**: the model's detailed
+  capture/acknowledge receipt (candidate-id tables, skip reasons, type lists)
+  was re-scanned by the next agent_end and produced up to 8 candidates from the
+  SAME receipt text via different type rules — zero new semantics. Two new
+  gate-noise rules in isGateMetaDiscourse: (1b) any block containing
+  `cand_<32hex>` candidate-id hashes is treated as receipt/echo (even when
+  long — the previous ≤40-word + ≥2-vocab heuristic missed long tables);
+  (1c) candidate-id line density (≥2 cand_ lines) also marks meta. Real
+  semantics without candidate-id hashes are preserved.
+- **Fix retrieval noise injection** (field report: '为什么我的 pi coding agent
+  的 b-ai 的模型无法使用？' matched 6 unrelated notes via broad terms
+  模型/使用 and polluted the context): (1) GENERIC_TERM_PARTS + expanded
+  TASK_STOP_WORDS — broad/generic terms never survive the bigram split and
+  cannot drive injection; (2) minimum-match gate in taskStartRetrieval — a
+  note is injected only when ≥2 distinct prompt terms match, or a single
+  high-weight title/next_action hit reaches a strong score. Specific-term
+  retrieval (e.g. 'database migration rollback') is unaffected.
+- Regression tests: receipt-shaped echo (zero candidates) + broad-prompt
+  no-injection (69 → 71).
+
+## 0.4.2 - 2026-09-01
+
 ## 0.4.2 - 2026-09-01
 
 - **Fix exponential capture-gate loop (reported from researchctl, 182 envelopes / 56 unresolved)**: two root causes in the agent_end signal pipeline:

@@ -258,6 +258,32 @@ test("task-start retrieval ranks an older prompt-relevant note above newer unrel
   assert.equal(retrieval.active.some((hit) => /unrelated-ui/.test(hit.note.title)), false);
 });
 
+test("broad generic prompts do not inject unrelated notes (retrieval noise regression)", () => {
+  // Field report: '为什么我的 pi coding agent 的 b-ai 的模型无法使用？'
+  // previously matched 6 unrelated notes via 模型/使用 (broad terms) and
+  // polluted the context. Stop words + minimum-match gate must keep them out.
+  const { memory } = fixture();
+  memory.capture({
+    ...input("decision", "phase3-state"),
+    title: "Phase 3 学习者状态延后",
+    summary: "quiz 事件回路已通，explain.state/v1 延后，模型与使用信号相关讨论",
+  });
+  memory.capture({
+    ...input("risk", "analogy-hollow"),
+    title: "analogyBreakage 空心话术风险",
+    summary: "类比话术仅 warn 不阻断，需真实使用数据",
+  });
+  const retrieval = memory.taskStartRetrieval({
+    text: "为什么我的 pi coding agent 的 b-ai 的模型无法使用？",
+    types: ["decision", "risk"],
+    limit: 10,
+  });
+  // Only strong/broad terms like 模型/使用 are in the prompt; the notes
+  // otherwise share no specific term with it (b-ai, coding agent are
+  // absent from their text) — injection must be suppressed.
+  assert.equal(retrieval.active.length, 0, `expected no injection, got ${retrieval.active.length}`);
+});
+
 test("trusted canonical conflict evidence produces needs_review without overwriting lifecycle status", () => {
   const { cwd, memory } = fixture();
   const decision = memory.capture(input("decision", "canonical-conflict"));
