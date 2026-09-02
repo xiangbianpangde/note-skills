@@ -95,6 +95,8 @@ pi -e .
 
 Then initialize an opted-in project with the `note_skills` tool action `init` or the `/note-skills-init <project-id>` command.
 
+Retrieval injection is **opt-in**: by default the first matching memory shows a decision prompt (`first_ask`); enable it with `/note-skills on`, disable with `/note-skills off`, check state with `/note-skills status`.
+
 ## MVP capability boundary
 
 Version 0.4.0 uses exact metadata filters, prompt-term relevance ranking, and trusted canonical-state triggers. It does not include embeddings, a graph database, a daemon, automatic scientific adjudication, or cross-project federation. Promote requires a content-bound single-use UI approval whose process-local capability is re-verified against the exact approved bytes before every canonical write; pending capture candidates persist durably under `.note-skills/pending/`.

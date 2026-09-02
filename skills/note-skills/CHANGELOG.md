@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.4 - 2026-09-02
+
+- Retrieval injection opt-in: `retrieval_gate` config (first_ask default / enabled / disabled) + `/note-skills [on|off|status]` human command. First matching retrieval shows a decision prompt instead of silently injecting (field report: context pollution on broad queries). Regression tests (71→72).
+
 ## 0.4.3 - 2026-09-02
 
 - Fix receipt echo-amplification loop (PM-DEF-0009): receipt-shaped text (cand_ id tables, skip reasons) is excluded from agent_end scanning; retrieval noise fix: broad generic terms (模型/使用/为什么...) no longer drive injection + minimum-match gate (≥2 distinct terms or strong single hit). Regression tests: receipt-echo zero candidates + broad-prompt no-injection (69→71).

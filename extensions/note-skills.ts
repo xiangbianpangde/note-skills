@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as yaml from "yaml";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -7,7 +8,10 @@ import { Type } from "typebox";
 import {
   ProjectMemory,
   ProjectMemoryError,
+  configPath,
+  readConfig,
   sha256hex,
+  writeFileAtomic,
   type CanonicalTargetKind,
   type CaptureInput,
   type NoteType,
@@ -178,6 +182,13 @@ export function detectCaptureSignals(text: string): CaptureSignal[] {
 
 function hasConfig(cwd: string): boolean {
   return fs.existsSync(path.join(cwd, MEMORY_DIR, "config.yaml"));
+}
+
+/** Persist the retrieval injection gate state (human-controlled opt-in). */
+function setRetrievalGate(cwd: string, gate: "first_ask" | "enabled" | "disabled"): void {
+  const cfg = readConfig(cwd);
+  const next: Record<string, unknown> = { ...cfg, retrieval_gate: gate };
+  writeFileAtomic(configPath(cwd), `# Note Skills config (managed by note-skills core; do not hand-edit beyond documented fields)\n${yaml.stringify(next)}`);
 }
 
 function requireString(value: string | undefined, field: string): string {
@@ -716,8 +727,32 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event, ctx) => {
     if (!hasConfig(ctx.cwd)) return;
     try {
-      const content = retrievalMessage(new ProjectMemory(ctx.cwd), event.prompt);
+      const memory = new ProjectMemory(ctx.cwd);
+      const gate = memory.config().retrieval_gate ?? "first_ask";
+      if (gate === "disabled") return; // human opted out — never inject
+      const content = retrievalMessage(memory, event.prompt);
       if (!content) return;
+      if (gate === "first_ask") {
+        // First injection: ask the model/user to decide instead of injecting
+        // silently (field report: broad queries polluted context before the
+        // user ever asked for memory). The model may call note_skills or tell
+        // the user /note-skills on. We display a decision prompt with the
+        // candidate note brief; injection happens only after `on`.
+        return {
+          message: {
+            customType: "note-skills-retrieval-gate",
+            content: [
+              "[Note Skills retrieval — first-use gate]",
+              "This project has memory notes that may match the current task. Retrieval is OFF by default (opt-in).",
+              "• 若需要：请用户运行 /note-skills on 开启；或你调用 note_skills search 主动查询。",
+              "• 若不需要：忽略本条消息即可，不会自动注入。",
+              `${content.slice(0, 2000)}`,
+            ].join("\n"),
+            display: true,
+            details: { authority: "memory", trusted: false, first_ask: true },
+          },
+        };
+      }
       return {
         message: {
           customType: "note-skills-retrieval",
@@ -924,6 +959,39 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
         );
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  /**
+   * /note-skills [on|off|status] — human-controlled retrieval injection gate.
+   * Retrieval is OFF by default (first_ask: the first before_agent_start with
+   * a matching note displays a decision prompt; the model/user may start it).
+   * `on`  => always inject (enabled)
+   * `off` => never inject (disabled)
+   * `status` (or no arg) => show current gate state.
+   */
+  pi.registerCommand("note-skills", {
+    description: "Control note-skills retrieval injection (usage: /note-skills [on|off|status])",
+    handler: async (args, ctx) => {
+      if (!hasConfig(ctx.cwd)) {
+        ctx.ui.notify("Note Skills is not initialized (run /note-skills-init first)", "warning");
+        return;
+      }
+      const arg = args.trim().toLowerCase();
+      const memory = new ProjectMemory(ctx.cwd);
+      const current = memory.config().retrieval_gate ?? "first_ask";
+      if (arg === "on" || arg === "enabled") {
+        setRetrievalGate(ctx.cwd, "enabled");
+        ctx.ui.notify("Note Skills retrieval injection: ON", "info");
+      } else if (arg === "off" || arg === "disabled") {
+        setRetrievalGate(ctx.cwd, "disabled");
+        ctx.ui.notify("Note Skills retrieval injection: OFF", "info");
+      } else if (arg === "" || arg === "status") {
+        const state = current === "enabled" ? "ON" : current === "disabled" ? "OFF" : "FIRST_ASK (opt-in)";
+        ctx.ui.notify(`Note Skills retrieval gate: ${state} (use /note-skills on|off)`,"info");
+      } else {
+        ctx.ui.notify("Usage: /note-skills [on|off|status]", "error");
       }
     },
   });

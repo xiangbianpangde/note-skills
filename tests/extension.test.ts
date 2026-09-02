@@ -165,6 +165,7 @@ test("gate meta-discourse does not self-capture (same-source loop regression)", 
 function extensionHarness() {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const commands: string[] = [];
+  const commandHandlers = new Map<string, (args: string, ctx: unknown) => unknown>();
   const events = new Map<string, (...args: unknown[]) => unknown>();
   const sent: unknown[] = [];
   const entries: unknown[] = [];
@@ -172,8 +173,9 @@ function extensionHarness() {
     registerTool(tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) {
       tools.push(tool);
     },
-    registerCommand(name: string) {
+    registerCommand(name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => unknown }) {
       commands.push(name);
+      commandHandlers.set(name, spec.handler);
     },
     on(name: string, handler: (...args: unknown[]) => unknown) {
       events.set(name, handler);
@@ -186,7 +188,7 @@ function extensionHarness() {
     },
   };
   projectMemoryExtension(mock as never);
-  return { tools, commands, events, sent, entries };
+  return { tools, commands, commandHandlers, events, sent, entries };
 }
 
 test("extension registers one memory tool, lifecycle gates, and user commands", () => {
@@ -197,7 +199,7 @@ test("extension registers one memory tool, lifecycle gates, and user commands", 
   const parameters = (tools[0] as unknown as { parameters: { properties?: Record<string, unknown> } }).parameters;
   assert.equal(parameters.properties?.approved, undefined);
   assert.ok(parameters.properties?.candidate_ids);
-  assert.deepEqual(new Set(commands), new Set(["note-skills-init", "note-skills-reconcile"]));
+  assert.deepEqual(new Set(commands), new Set(["note-skills-init", "note-skills-reconcile", "note-skills"]));
   for (const event of ["session_start", "before_agent_start", "agent_settled", "agent_end", "session_before_compact"]) {
     assert.ok(events.has(event), `missing event ${event}`);
   }
@@ -225,12 +227,47 @@ test("task-start retrieval is bounded and explicitly non-authoritative", () => {
     sessionManager: { getSessionId: () => "session-retrieval", getLeafId: () => "leaf-retrieval" },
   };
   const result = events.get("before_agent_start")!({ prompt: "start task" }, ctx) as {
-    message?: { content?: string; details?: { authority?: string; trusted?: boolean } };
+    message?: { content?: string; details?: { authority?: string; trusted?: boolean; first_ask?: boolean } };
   };
   assert.ok(result.message);
-  assert.match(result.message.content ?? "", /non-authoritative data/);
+  assert.match(result.message.content ?? "", /non-authoritative/);
   assert.ok((result.message.content?.length ?? Infinity) <= 9_000);
-  assert.deepEqual(result.message.details, { authority: "memory", trusted: false });
+  // Retrieval gate default = first_ask: the first matching content displays a
+  // decision prompt (opt-in), not a silent injection.
+  assert.deepEqual(result.message.details, { authority: "memory", trusted: false, first_ask: true });
+});
+
+test("retrieval gate respects /note-skills on|off and first_ask opt-in", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-extension-gate-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "extension-gate" });
+  memory.capture({
+    type: "decision",
+    title: "Database migration strategy",
+    summary: "Reversible migration for safety",
+    rationale: "Rollback matters",
+    next_action: "Apply when migration resumes",
+    source_refs: [{ kind: "manual", ref: "test://gate" }],
+  });
+  const { events, commandHandlers } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-gate", getLeafId: () => "leaf-gate" },
+  };
+  // OFF: no injection at all.
+  commandHandlers.get("note-skills")!("off", ctx);
+  const off = events.get("before_agent_start")!({ prompt: "database migration" }, ctx);
+  assert.equal(off, undefined);
+  // ON: full non-authoritative injection.
+  commandHandlers.get("note-skills")!("on", ctx);
+  const on = events.get("before_agent_start")!({ prompt: "database migration" }, ctx) as {
+    message?: { content?: string; details?: { authority?: string; trusted?: boolean; first_ask?: boolean } };
+  };
+  assert.ok(on.message);
+  assert.match(on.message.content ?? "", /non-authoritative data/);
+  assert.deepEqual(on.message.details, { authority: "memory", trusted: false });
 });
 
 test("before_agent_start uses the actual prompt to retrieve older relevant memory", () => {

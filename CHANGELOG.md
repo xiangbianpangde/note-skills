@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.4 - 2026-09-02
+
+- **Retrieval injection is now opt-in (first-use gate)**: before_agent_start
+  no longer injects memory notes silently. New config field `retrieval_gate`
+  (`first_ask` default / `enabled` / `disabled`):
+  - `first_ask`: the first matching retrieval displays a decision prompt
+    (customType `note-skills-retrieval-gate`) telling the model/user to run
+    `/note-skills on` to enable, or ignore to stay off — no pollution before
+    the user asked for memory (field report).
+  - `enabled`: always inject (previous behavior).
+  - `disabled`: never inject.
+  - Human control: new `/note-skills [on|off|status]` command reads/writes the
+    gate; `status` shows current state.
+- Breaking-ish behavior change (opt-in by default); existing projects keep
+  `first_ask` (fail closed). Regression tests: gate off/on/status + first_ask
+  decision prompt (71 → 72).
+
 ## 0.4.3 - 2026-09-02
 
 - **Fix receipt echo-amplification loop (PM-DEF-0009)**: the model's detailed

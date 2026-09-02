@@ -219,6 +219,15 @@ export interface ConfigFile {
    * notes or from state inside .note-skills (§11.7–§11.8).
    */
   canonical_state_file?: string
+  /**
+   * Retrieval injection gate (opt-in): when "first_ask", the first
+   * before_agent_start retrieval asks the model/user to start (via a
+   * displayed prompt decision), when "enabled" retrieval always injects,
+   * when "disabled" it never injects. Default first_ask (opt-in, not
+   * automatic — field report: broad queries previously polluted context
+   * before the user ever asked for memory).
+   */
+  retrieval_gate?: 'first_ask' | 'enabled' | 'disabled'
 }
 
 export const PROJECT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -307,6 +316,10 @@ export function readConfig(cwd: string): ConfigFile {
       typeof c.canonical_state_file === 'string' && c.canonical_state_file !== ''
         ? c.canonical_state_file
         : undefined,
+    retrieval_gate:
+      c.retrieval_gate === 'enabled' || c.retrieval_gate === 'disabled'
+        ? c.retrieval_gate
+        : 'first_ask', // unknown/missing => first_ask (opt-in, fail closed)
   }
   return out
 }
