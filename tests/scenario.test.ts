@@ -122,7 +122,7 @@ process.stdout.write(JSON.stringify({
   assert.equal(d.errors, 0);
 });
 
-test("P0-D: Context Independence Test — completely fresh blank sessions continue tasks seamlessly from working context", async () => {
+test("P0-D: Cross-Process Context Persistence Benchmark — completely fresh blank sessions continue tasks seamlessly from working context", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-context-independence-"));
   fs.writeFileSync(path.join(cwd, "SPEC.md"), "# Canonical Auth Spec\n\nMust support revocation.\n");
 

@@ -2,7 +2,7 @@
 
 ## 0.5.0 - 2026-09-03
 
-- Major architecture pivot (P0-A..P0-E complete): L1 External Working Context (`PROJECT_CONTEXT.md`) + Transactional Flush (`/note-skills-flush`) + Safe Aggressive Compaction (`/note-skills-flush-compact`) + Fresh-Session Reconstruction with Context Independence Benchmark + 12-Failure-Mode Adversarial Test Suite. Tests: 73 -> 92 (100% passing).
+- Major architecture pivot & Sol sign-off hardening: 2-Layer Working Context + 2PC Flush + Dual-Mode Compaction + Fresh-Session Reconstruction + 12 Hardened Adversarial Failure Modes (INV-AUTH-02 arbitration, anti-wipeout negative constraints, mandatory CAS, read boundary trust gates). Tests: 73 -> 92 (100% passing).
 
 ## 0.4.5 - 2026-09-02
 

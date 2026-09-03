@@ -831,6 +831,7 @@ test("P0-C: Dual-mode compaction — verified pointer compaction (Mode A) vs eme
       action: "flush_compact",
       content: flushBody,
       covered_through_entry_id: "entry-007",
+      base_context_sha256: receipt.new_context_sha256,
     } as never,
     new AbortController().signal as never,
     undefined as never,

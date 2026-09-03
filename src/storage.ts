@@ -758,6 +758,48 @@ export function validateProjectContext(
   }
 }
 
+export function extractNegativeConstraints(body: string): string | undefined {
+  const match = body.match(
+    /##\s*(?:negative\s*constraints|do\s*not\s*assume)(?:\s*[/|]\s*(?:negative\s*constraints|do\s*not\s*assume))?\s*\n+([\s\S]*?)(?=\n+##|$)/i,
+  )
+  const content = match?.[1]?.trim()
+  return content && content !== '- None specified' ? content : undefined
+}
+
+export function tryReadGitIdentity(cwd: string): { branch?: string; head?: string } {
+  try {
+    const gitDir = path.join(cwd, '.git')
+    if (!fs.existsSync(gitDir)) return {}
+    let headPath = path.join(gitDir, 'HEAD')
+    const st = fs.statSync(gitDir)
+    if (!st.isDirectory()) {
+      const gitFileContent = fs.readFileSync(gitDir, 'utf8').trim()
+      const match = /^gitdir:\s*(.+)$/i.exec(gitFileContent)
+      if (match && match[1]) {
+        const resolvedGitDir = path.resolve(cwd, match[1])
+        headPath = path.join(resolvedGitDir, 'HEAD')
+      }
+    }
+    if (!fs.existsSync(headPath)) return {}
+    const headContent = fs.readFileSync(headPath, 'utf8').trim()
+    const branchMatch = /^ref: refs\/heads\/(.+)$/.exec(headContent)
+    if (branchMatch && branchMatch[1]) {
+      const branch = branchMatch[1]
+      let head: string | undefined
+      const branchRefFile = path.join(path.dirname(headPath), 'refs', 'heads', branch)
+      if (fs.existsSync(branchRefFile)) {
+        head = fs.readFileSync(branchRefFile, 'utf8').trim()
+      }
+      return { branch, head }
+    } else if (/^[0-9a-f]{40}$/i.test(headContent)) {
+      return { head: headContent, branch: undefined }
+    }
+    return {}
+  } catch {
+    return {}
+  }
+}
+
 export function nextFreeCheckpointId(dir: string): string {
   let names: string[] = []
   try {
@@ -777,7 +819,7 @@ export function nextFreeCheckpointId(dir: string): string {
   return `CP-${String(maxSeq + 1).padStart(4, '0')}`
 }
 
-export function readProjectContext(cwd: string): ProjectContext | null {
+export function readProjectContext(cwd: string, opts: { validate?: boolean } = {}): ProjectContext | null {
   assertMemoryRootSafe(cwd)
   const file = projectContextPath(cwd)
   if (!fs.existsSync(file)) return null
@@ -786,7 +828,12 @@ export function readProjectContext(cwd: string): ProjectContext | null {
   if (raw === null) return null
   const { metadata, body } = parseProjectContext(raw)
   const sha256 = sha256hex(raw)
-  return { metadata, body, raw, sha256 }
+  const context: ProjectContext = { metadata, body, raw, sha256 }
+  if (opts.validate) {
+    const cfg = readConfig(cwd)
+    validateProjectContext(context, cfg.project_id)
+  }
+  return context
 }
 
 export function readFlushReceipt(cwd: string, checkpointId: string): FlushReceipt | null {

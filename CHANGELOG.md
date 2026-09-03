@@ -2,26 +2,17 @@
 
 ## 0.5.0 - 2026-09-03
 
-- **v0.5.0 Major Architecture Pivot (P0-A, P0-B, P0-C, P0-D & P0-E complete)**: From long-term memory archive alone to a 2-Layer Working Memory & Context Offload system.
-  - **P0-A Contract & Peer Dependency**:
-    - Peer dependency updated: `@earendil-works/pi-coding-agent >=0.84.4`.
-    - Formally established Two-Dimensional Authority Model: `PROJECT_CONTEXT.md` carries `authority: working_projection` (non-authoritative state projection, canonical truth overrides).
-  - **P0-B Transactional Flush & Working Context**:
-    - L1 Working Context: `PROJECT_CONTEXT.md` maintained at project root, bounded to 5KB hard cap with required sections (`## Current Objective`, `## Next Action`, `## Negative Constraints / Do Not Assume`).
-    - Two-Phase Commit Flush: acquires `context.lock`, checks CAS (`base_context_sha256`), writes durable snapshot `.note-skills/checkpoints/CP-xxxx.md`, updates root `PROJECT_CONTEXT.md`, reads back & verifies hash, and emits verified `FlushReceipt`.
-    - Core APIs: `flushWorkingContext()`, `readWorkingContext()`, `verifyFlushReceipt()`.
-    - Extension integrations: tool actions `flush` & `read_context`, command `/note-skills-flush`.
-  - **P0-C Safe Aggressive Compaction & Dual-Mode Compaction**:
-    - Extension command `/note-skills-flush-compact` and tool action `flush_compact`: flushes working context and immediately triggers active compaction via Pi's `ctx.compact()`.
-    - Mode A (Verified Pointer Compaction): when a verified checkpoint exists and covers the discarded frontier, replaces bloated history with minimal <100 token pointer summary and aggressively cuts `firstKeptEntryId` directly after the checkpointed boundary.
-    - Mode B (Emergency Safe Compaction): when uncheckpointed, missing context, or mid-run token overflow occurs, falls back to native structured compaction and logs `EMERGENCY_UNFLUSHED_COMPACTION` — strictly obeying invariant INV-COMPACT-01 (*Never evict uncheckpointed state*).
-    - Lifecycle tracking: `session_compact` resets compaction block counter; `session_compact_failed` warns on unexpected failure.
-  - **P0-D Fresh-Session Reconstruction & Context Independence Benchmark**:
-    - `before_agent_start`: automatically detects and injects `PROJECT_CONTEXT.md` wrapped in a non-authoritative security envelope (`authority: working_projection`) explicitly stating that canonical files override and no permissions are elevated.
-    - Git Branch Staleness Guard: compares checkpoint's `git_branch` with live repository branch; warns `CONTEXT_STALE` on mismatch to prevent cross-branch context contamination (§6.2).
-    - Context Independence Test: multi-process automated benchmark in `tests/scenario.test.ts` proving a fresh blank session with zero conversation history continues tasks seamlessly and preserves negative constraints.
-  - **P0-E 12-Failure-Mode Adversarial Test Suite**:
-    - Dedicated `tests/adversarial.test.ts` covering all 12 adversarial scenarios requested by Sol: (1) ordinary resume, (2) negative constraint retention, (3) canonical conflict precedence (INV-AUTH-02), (4) external human edit CAS defense, (5) branch drift detection, (6) corrupted context fail-closed, (7) corrupted checkpoint fail-closed, (8) mid-run overflow Mode B fallback, (9) unresolved candidate compaction blocking, (10) secret pattern blocking (POLICY_VIOLATION), (11) 5KB budget exceeding (BUDGET_EXCEEDED), (12) concurrent writers lock serialization.
+- **v0.5.0 Major Architecture Pivot & Sol Sign-off Hardening (P0-A..P0-E)**:
+  From long-term memory archive alone to a 2-Layer Working Memory & Context Offload system.
+  - **Sol Audit P1 Closures**:
+    1. *Read Trust Boundary*: `readWorkingContext()` re-validates 5KB budget, required sections, and re-scans secret patterns on read boundary; tainted/oversized external edits fail closed and are never injected.
+    2. *Anti-Wipeout for Negative Constraints*: silent deletion of negative constraints is forbidden (`POLICY_VIOLATION`); `/note-skills-flush` and `/note-skills-flush-compact` inherit active negative constraints from previous checkpoints.
+    3. *Mandatory CAS*: `base_context_sha256` is mandatory when updating an existing `PROJECT_CONTEXT.md` (no ungrounded overwrites).
+    4. *FlushReceipt Cross-Verification*: `verifyFlushReceipt` cross-verifies receipt fields (`checkpoint_id`, `covered_through_entry_id`, `source_session_id`, git metadata) against checkpoint frontmatter.
+    5. *Compaction Mode A Ancestry & Coverage Gate*: if `covered_through_entry_id` cannot be found on current branch ancestry or session mismatches, compaction unconditionally falls back to Mode B (upholding INV-COMPACT-01).
+    6. *Branch Drift Fail-Closed*: git identity auto-collected from `.git`; when branch drift is detected, operational body (objective, next action) is completely suppressed from injection.
+    7. *True INV-AUTH-02 Arbitration*: `assertWorkingContextCanonicalConsistency` and `checkWorkingContextCanonicalConflict` detect milestone/canonical contradictions, fail closed, and suppress operational state.
+    8. *Hardened Adversarial Test Suite*: all 12 adversarial scenarios verified with real failure modes (concurrency lock contention, external secret injection, tampered receipts, ancestry mismatch).
   - Regression tests: 73 -> 92 tests (100% passing).
 
 ## 0.4.5 - 2026-09-02

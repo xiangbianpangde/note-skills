@@ -122,6 +122,8 @@ import {
   readFlushReceipt,
   ensureMemoryDirs,
   assertMemoryRootSafe,
+  extractNegativeConstraints,
+  tryReadGitIdentity,
 } from './storage.ts'
 import type { ConfigFile, ScannedRaw, ScanIssue, IndexSnapshot } from './storage.ts'
 
@@ -2173,14 +2175,50 @@ export class ProjectMemory {
     const currentContext = readProjectContext(this.cwd)
     const currentSha256 = currentContext ? currentContext.sha256 : ''
 
-    // CAS check if base_context_sha256 is explicitly provided
-    if (input.base_context_sha256 !== undefined && input.base_context_sha256 !== currentSha256) {
-      throw new ProjectMemoryError(
-        'CONTEXT_CONFLICT',
-        `PROJECT_CONTEXT was modified concurrently (expected base "${input.base_context_sha256}", actual current "${currentSha256}")`,
-        { expected: input.base_context_sha256, actual: currentSha256 },
-      )
+    // CAS check (Item 3 & P1-3): mandatory when updating an existing context
+    if (currentContext) {
+      if (!input.base_context_sha256 || typeof input.base_context_sha256 !== 'string' || input.base_context_sha256.trim() === '') {
+        throw new ProjectMemoryError(
+          'CONTEXT_CONFLICT',
+          'base_context_sha256 is mandatory when updating an existing PROJECT_CONTEXT.md (optimistic concurrency required to protect concurrent / human edits)',
+          { actual_current: currentSha256 },
+        )
+      }
+      if (input.base_context_sha256 !== currentSha256) {
+        throw new ProjectMemoryError(
+          'CONTEXT_CONFLICT',
+          `PROJECT_CONTEXT was modified concurrently (expected base "${input.base_context_sha256}", actual current "${currentSha256}")`,
+          { expected: input.base_context_sha256, actual: currentSha256 },
+        )
+      }
+
+      // Negative constraints protection (Item 2 & Sol review):
+      // Never allow silent deletion of existing negative constraints
+      const prevNegative = extractNegativeConstraints(currentContext.body)
+      const newNegative = extractNegativeConstraints(body)
+      if (prevNegative && (!newNegative || newNegative === '- None specified')) {
+        throw new ProjectMemoryError(
+          'POLICY_VIOLATION',
+          'silent deletion of negative constraints is forbidden: previous context had active constraints in "## Negative Constraints / Do Not Assume" (§3.3)',
+          { previous_negative_constraints: prevNegative },
+        )
+      }
+    } else {
+      if (input.base_context_sha256 && input.base_context_sha256 !== '') {
+        throw new ProjectMemoryError(
+          'CONTEXT_CONFLICT',
+          `cannot provide non-empty base_context_sha256 ("${input.base_context_sha256}") when no PROJECT_CONTEXT.md exists yet`,
+        )
+      }
     }
+
+    // Canonical truth consistency check (INV-AUTH-02)
+    this.assertWorkingContextCanonicalConsistency(body)
+
+    // Automatically collect git identity if not explicitly provided (Item 6)
+    const gitInfo = tryReadGitIdentity(this.cwd)
+    const gitBranch = input.git_branch ?? gitInfo.branch
+    const gitHead = input.git_head ?? gitInfo.head
 
     const nextRevision = (currentContext?.metadata.context_revision ?? 0) + 1
     const checkpointId = nextFreeCheckpointId(checkpointsDir(this.cwd))
@@ -2194,8 +2232,8 @@ export class ProjectMemory {
       checkpoint_id: checkpointId,
       source_session_id: input.source_session_id ?? 'unknown-session',
       covered_through_entry_id: input.covered_through_entry_id,
-      git_branch: input.git_branch,
-      git_head: input.git_head,
+      git_branch: gitBranch,
+      git_head: gitHead,
       workspace_fingerprint: input.workspace_fingerprint,
       base_context_sha256: currentSha256,
       generated_at: nowIso,
@@ -2263,7 +2301,21 @@ export class ProjectMemory {
 
   readWorkingContext(): ProjectContext | null {
     assertProjectDir(this.cwd)
-    return readProjectContext(this.cwd)
+    const ctx = readProjectContext(this.cwd)
+    if (!ctx) return null
+    const cfg = readConfig(this.cwd)
+    // Re-validate size budget, schema, authority, required sections on read boundary
+    validateProjectContext(ctx, cfg.project_id)
+    // Re-scan secrets on read boundary
+    const secretHits = findSecretMatches({ body: ctx.body }, secretRulesFor(cfg), '$workingContext')
+    if (secretHits.length) {
+      throw new ProjectMemoryError(
+        'POLICY_VIOLATION',
+        'PROJECT_CONTEXT body violates secret policy (secret detected on read boundary)',
+        { matched: secretHits.map((hit) => `${hit.rule}@${hit.path}`) },
+      )
+    }
+    return ctx
   }
 
   verifyFlushReceipt(checkpointId: string): FlushReceipt | null {
@@ -2271,13 +2323,80 @@ export class ProjectMemory {
     const receipt = readFlushReceipt(this.cwd, checkpointId)
     if (!receipt) return null
     if (receipt.status !== 'FLUSH_VERIFIED') return null
-    // Verify checkpoint file exists and hash matches
+    if (receipt.checkpoint_id !== checkpointId) return null
+
+    // 1. Verify checkpoint file exists and raw bytes hash matches receipt.new_context_sha256
     const cpFile = checkpointPath(this.cwd, checkpointId)
     const cpText = tryReadText(cpFile)
     if (cpText === null || sha256hex(cpText) !== receipt.new_context_sha256) {
       return null
     }
+
+    // 2. Parse checkpoint frontmatter and cross-verify metadata fields
+    let parsedCp: { metadata: ProjectContextMetadata; body: string }
+    try {
+      parsedCp = parseProjectContext(cpText)
+    } catch {
+      return null
+    }
+    const cpMeta = parsedCp.metadata
+    if (
+      cpMeta.checkpoint_id !== receipt.checkpoint_id ||
+      cpMeta.covered_through_entry_id !== receipt.covered_through_entry_id ||
+      cpMeta.source_session_id !== receipt.source_session_id ||
+      (receipt.git_head !== undefined && cpMeta.git_head !== receipt.git_head) ||
+      (receipt.git_branch !== undefined && cpMeta.git_branch !== receipt.git_branch)
+    ) {
+      return null // Tampered receipt or mismatched checkpoint metadata!
+    }
+
     return receipt
+  }
+
+  /**
+   * Checks if working context contradicts canonical state (§INV-AUTH-02).
+   */
+  checkWorkingContextCanonicalConflict(context: ProjectContext): { reason: string; canonical_ref: string } | null {
+    const state = this.loadCanonicalState()
+    if (!state) return null
+    const cfg = readConfig(this.cwd)
+    // Check milestones
+    for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
+      if (status !== 'complete' && status !== 'done') {
+        const re = new RegExp(
+          `(?:milestone\\s+)?${milestone}\\s*(?:is|:)?\\s*(?:complete|done|completed|已完成)`,
+          'i',
+        )
+        if (re.test(context.body)) {
+          return {
+            reason: `working context asserts milestone "${milestone}" is complete, but canonical state records "${status}"`,
+            canonical_ref: cfg.canonical_state_file ?? 'canonical state',
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  private assertWorkingContextCanonicalConsistency(body: string): void {
+    const state = this.loadCanonicalState()
+    if (!state) return
+    const cfg = readConfig(this.cwd)
+    for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
+      if (status !== 'complete' && status !== 'done') {
+        const re = new RegExp(
+          `(?:milestone\\s+)?${milestone}\\s*(?:is|:)?\\s*(?:complete|done|completed|已完成)`,
+          'i',
+        )
+        if (re.test(body)) {
+          throw new ProjectMemoryError(
+            'CONFLICT',
+            `working context contradicts canonical milestone "${milestone}": canonical state records "${status}", but context asserts complete (per INV-AUTH-02, canonical truth overrides)`,
+            { milestone, canonical_status: status, canonical_ref: cfg.canonical_state_file },
+          )
+        }
+      }
+    }
   }
 
   /* ---------------- index (§15.3) ---------------- */
