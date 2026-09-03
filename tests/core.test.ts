@@ -1987,3 +1987,154 @@ test("captureAndResolvePending settles via the merged path (existing fingerprint
     "merged note must carry the candidate-bound source",
   );
 });
+
+test("flushWorkingContext creates PROJECT_CONTEXT.md, checkpoint CP-0001, and verified receipt", () => {
+  const { cwd, memory } = fixture();
+  const validBody = [
+    "# Project Working Context",
+    "",
+    "## Current Objective",
+    "- Complete P0-B transactional flush implementation",
+    "",
+    "## Negative Constraints / Do Not Assume",
+    "- Do not assume P1 is approved",
+    "- Do not modify canonical SPEC directly",
+    "",
+    "## Next Action",
+    "- Run core tests and verify receipt",
+  ].join("\n");
+
+  const receipt = memory.flushWorkingContext({
+    content: validBody,
+    covered_through_entry_id: "entry-001",
+    source_session_id: "session-test",
+    git_branch: "main",
+    git_head: "abcdef123456",
+  });
+
+  assert.equal(receipt.status, "FLUSH_VERIFIED");
+  assert.equal(receipt.checkpoint_id, "CP-0001");
+  assert.equal(receipt.covered_through_entry_id, "entry-001");
+  assert.equal(receipt.old_context_sha256, "");
+  assert.ok(receipt.new_context_sha256.length === 64);
+
+  // PROJECT_CONTEXT.md exists at root
+  const rootFile = path.join(cwd, "PROJECT_CONTEXT.md");
+  assert.ok(fs.existsSync(rootFile));
+
+  // Checkpoint file exists
+  const cpFile = path.join(cwd, ".note-skills", "checkpoints", "CP-0001.md");
+  assert.ok(fs.existsSync(cpFile));
+  assert.equal(fs.readFileSync(rootFile, "utf8"), fs.readFileSync(cpFile, "utf8"));
+
+  // Receipt exists and is verified
+  const verified = memory.verifyFlushReceipt("CP-0001");
+  assert.ok(verified);
+  assert.equal(verified?.status, "FLUSH_VERIFIED");
+
+  // readWorkingContext reads parsed projection
+  const ctx = memory.readWorkingContext();
+  assert.ok(ctx);
+  assert.equal(ctx?.metadata.authority, "working_projection");
+  assert.equal(ctx?.metadata.checkpoint_id, "CP-0001");
+  assert.equal(ctx?.metadata.context_revision, 1);
+  assert.match(ctx?.body ?? "", /Complete P0-B/);
+});
+
+test("flushWorkingContext enforces 2PC CAS: conflicting base_context_sha256 throws CONTEXT_CONFLICT", () => {
+  const { memory } = fixture();
+  const validBody = [
+    "# Project Working Context",
+    "## Current Objective\n- Objective 1",
+    "## Negative Constraints / Do Not Assume\n- Constraint 1",
+    "## Next Action\n- Next 1",
+  ].join("\n");
+
+  const receipt1 = memory.flushWorkingContext({
+    content: validBody,
+    covered_through_entry_id: "entry-001",
+  });
+  assert.equal(receipt1.checkpoint_id, "CP-0001");
+
+  // Attempt second flush with wrong base hash
+  expectCode(
+    () =>
+      memory.flushWorkingContext({
+        content: validBody,
+        covered_through_entry_id: "entry-002",
+        base_context_sha256: "00".repeat(32),
+      }),
+    "CONTEXT_CONFLICT",
+  );
+
+  // Second flush with correct base hash succeeds and increments revision
+  const receipt2 = memory.flushWorkingContext({
+    content: validBody + "\n- Updated step",
+    covered_through_entry_id: "entry-002",
+    base_context_sha256: receipt1.new_context_sha256,
+  });
+  assert.equal(receipt2.status, "FLUSH_VERIFIED");
+  assert.equal(receipt2.checkpoint_id, "CP-0002");
+  assert.equal(receipt2.old_context_sha256, receipt1.new_context_sha256);
+  assert.equal(memory.readWorkingContext()?.metadata.context_revision, 2);
+});
+
+test("flushWorkingContext enforces 5KB budget, required sections, and secret scanning", () => {
+  const { memory } = fixture();
+  const validBody = [
+    "# Project Working Context",
+    "## Current Objective\n- Objective 1",
+    "## Negative Constraints / Do Not Assume\n- Constraint 1",
+    "## Next Action\n- Next 1",
+  ].join("\n");
+
+  // 1. Missing Current Objective
+  expectCode(
+    () =>
+      memory.flushWorkingContext({
+        content: "## Next Action\n- Next\n## Negative Constraints\n- None",
+        covered_through_entry_id: "e1",
+      }),
+    "INVALID_INPUT",
+  );
+
+  // 2. Missing Next Action
+  expectCode(
+    () =>
+      memory.flushWorkingContext({
+        content: "## Current Objective\n- Obj\n## Negative Constraints\n- None",
+        covered_through_entry_id: "e1",
+      }),
+    "INVALID_INPUT",
+  );
+
+  // 3. Missing Negative Constraints
+  expectCode(
+    () =>
+      memory.flushWorkingContext({
+        content: "## Current Objective\n- Obj\n## Next Action\n- Next",
+        covered_through_entry_id: "e1",
+      }),
+    "INVALID_INPUT",
+  );
+
+  // 4. Budget exceeded (>5120 bytes)
+  expectCode(
+    () =>
+      memory.flushWorkingContext({
+        content: validBody + "\n" + "x".repeat(5120),
+        covered_through_entry_id: "e1",
+      }),
+    "BUDGET_EXCEEDED",
+  );
+
+  // 5. Secret in working context
+  expectCode(
+    () =>
+      memory.flushWorkingContext({
+        content: validBody + "\ntoken=supersecretvalue123456",
+        covered_through_entry_id: "e1",
+      }),
+    "POLICY_VIOLATION",
+  );
+});

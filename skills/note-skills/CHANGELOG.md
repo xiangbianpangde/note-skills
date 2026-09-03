@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0 - 2026-09-03
+
+- Major architecture pivot (P0-A & P0-B): L1 External Working Context (`PROJECT_CONTEXT.md`) + Transactional Flush (`/note-skills-flush`). 2PC commit, CAS conflict detection, 5KB budget, and checkpoint ledger. Peer dependency >=0.84.4. Tests: 73 -> 77.
+
 ## 0.4.5 - 2026-09-02
 
 - Fix gate follow-up loop: runs triggered by `note-skills-capture-gate` are suppressed entirely from candidate scanning; assistant discourse planning or citing Note IDs (`PM-xxx`) is excluded. Regression test (72→73).

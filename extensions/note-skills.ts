@@ -44,6 +44,8 @@ const Params = Type.Object({
     "promote",
     "reconcile",
     "acknowledge",
+    "flush",
+    "read_context",
   ] as const),
   project_id: Type.Optional(Type.String({ description: "Project ID for init" })),
   canonical_state_file: Type.Optional(
@@ -109,6 +111,13 @@ const Params = Type.Object({
     Type.Array(Type.String(), { description: "Pending candidate IDs resolved by capture or acknowledge" }),
   ),
   skip_reason: Type.Optional(Type.String({ description: "Reason the named capture-gate candidates were skipped" })),
+  content: Type.Optional(Type.String({ description: "Markdown working context content for flush" })),
+  covered_through_entry_id: Type.Optional(
+    Type.String({ description: "Conversation entry/turn ID covered by this checkpoint for flush" }),
+  ),
+  base_context_sha256: Type.Optional(
+    Type.String({ description: "Expected sha256 of current PROJECT_CONTEXT.md for CAS check" }),
+  ),
 });
 
 export interface CaptureSignal {
@@ -705,6 +714,24 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           refreshPending(memory);
           break;
         }
+        case "flush": {
+          const content = requireString(params.content ?? params.body, "content");
+          const covered = params.covered_through_entry_id ?? ctx.sessionManager.getLeafId() ?? "entry-unknown";
+          const receipt = memory.flushWorkingContext({
+            content,
+            covered_through_entry_id: covered,
+            source_session_id: ctx.sessionManager.getSessionId(),
+            base_context_sha256: params.base_context_sha256,
+          });
+          pi.appendEntry("note-skills-flush-receipt", receipt);
+          result = receipt;
+          break;
+        }
+        case "read_context": {
+          const context = memory.readWorkingContext();
+          result = context ?? { message: "No PROJECT_CONTEXT.md exists yet" };
+          break;
+        }
       }
       return {
         content: [{ type: "text", text: compactResult(result) }],
@@ -1014,6 +1041,54 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
         ctx.ui.notify(`Note Skills retrieval gate: ${state} (use /note-skills on|off)`,"info");
       } else {
         ctx.ui.notify("Usage: /note-skills [on|off|status]", "error");
+      }
+    },
+  });
+
+  /**
+   * /note-skills-flush [summary] — manually flush working context to PROJECT_CONTEXT.md & checkpoint.
+   */
+  pi.registerCommand("note-skills-flush", {
+    description: "Flush working context to PROJECT_CONTEXT.md and record checkpoint",
+    handler: async (args, ctx) => {
+      if (!hasConfig(ctx.cwd)) {
+        ctx.ui.notify("Note Skills is not initialized (run /note-skills-init first)", "warning");
+        return;
+      }
+      try {
+        const memory = new ProjectMemory(ctx.cwd);
+        const current = memory.readWorkingContext();
+        const leafId = ctx.sessionManager.getLeafId() ?? "entry-manual";
+        if (args.trim()) {
+          const template = [
+            "# Project Working Context",
+            "",
+            "## Current Objective",
+            `- ${args.trim()}`,
+            "",
+            "## Negative Constraints / Do Not Assume",
+            "- None specified",
+            "",
+            "## Next Action",
+            `- Continue with: ${args.trim()}`,
+          ].join("\n");
+          const receipt = memory.flushWorkingContext({
+            content: template,
+            covered_through_entry_id: leafId,
+            source_session_id: ctx.sessionManager.getSessionId(),
+            base_context_sha256: current?.sha256,
+          });
+          ctx.ui.notify(`Flushed working context to ${receipt.checkpoint_id} (${receipt.status})`, "info");
+        } else if (current) {
+          ctx.ui.notify(
+            `Working context: ${current.metadata.checkpoint_id} (rev ${current.metadata.context_revision}), covered: ${current.metadata.covered_through_entry_id}`,
+            "info",
+          );
+        } else {
+          ctx.ui.notify("No PROJECT_CONTEXT.md exists. Usage: /note-skills-flush <objective / action>", "warning");
+        }
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     },
   });

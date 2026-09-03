@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 - 2026-09-03
+
+- **v0.5.0 Major Architecture Pivot (P0-A & P0-B)**: From long-term memory archive alone to a 2-Layer Working Memory & Context Offload system.
+  - **P0-A Contract & Peer Dependency**:
+    - Peer dependency updated: `@earendil-works/pi-coding-agent >=0.84.4`.
+    - Formally established Two-Dimensional Authority Model: `PROJECT_CONTEXT.md` carries `authority: working_projection` (non-authoritative state projection, canonical truth overrides).
+  - **P0-B Transactional Flush & Working Context**:
+    - L1 Working Context: `PROJECT_CONTEXT.md` maintained at project root, bounded to 5KB hard cap with required sections (`## Current Objective`, `## Next Action`, `## Negative Constraints / Do Not Assume`).
+    - Two-Phase Commit Flush: acquires `context.lock`, checks CAS (`base_context_sha256`), writes durable snapshot `.note-skills/checkpoints/CP-xxxx.md`, updates root `PROJECT_CONTEXT.md`, reads back & verifies hash, and emits verified `FlushReceipt`.
+    - Core APIs: `flushWorkingContext()`, `readWorkingContext()`, `verifyFlushReceipt()`.
+    - Extension integrations: tool actions `flush` & `read_context`, command `/note-skills-flush`.
+  - Regression tests: 73 -> 77 tests (full 2PC flush, CAS conflict, 5KB budget, required sections, secret scan, revision chaining, extension tool/command).
+
 ## 0.4.5 - 2026-09-02
 
 - **Completely eliminate gate follow-up loop trapping the user**:

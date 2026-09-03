@@ -261,7 +261,7 @@ test("extension registers one memory tool, lifecycle gates, and user commands", 
   const parameters = (tools[0] as unknown as { parameters: { properties?: Record<string, unknown> } }).parameters;
   assert.equal(parameters.properties?.approved, undefined);
   assert.ok(parameters.properties?.candidate_ids);
-  assert.deepEqual(new Set(commands), new Set(["note-skills-init", "note-skills-reconcile", "note-skills"]));
+  assert.deepEqual(new Set(commands), new Set(["note-skills-init", "note-skills-reconcile", "note-skills", "note-skills-flush"]));
   for (const event of ["session_start", "before_agent_start", "agent_settled", "agent_end", "session_before_compact"]) {
     assert.ok(events.has(event), `missing event ${event}`);
   }
@@ -631,4 +631,75 @@ test("handled risk A then new risk B in same leaf still yields a B candidate", a
   events.get("agent_end")!({ messages: [{ role: "user", content: "风险 B：插件泄漏。" }] }, ctx);
   const remaining = new ProjectMemory(cwd).pendingCaptureCandidates().filter((c) => c.type === "risk");
   assert.ok(remaining.length >= 1, "risk B must still produce a candidate after A was handled");
+});
+
+test("extension tool flush and read_context actions and /note-skills-flush command", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-ext-flush-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "ext-flush" });
+  const { tools, commandHandlers } = extensionHarness();
+  const notifications: string[] = [];
+  const ctx = {
+    cwd,
+    hasUI: true,
+    ui: {
+      setStatus() {},
+      notify(msg: string) {
+        notifications.push(msg);
+      },
+    },
+    sessionManager: { getSessionId: () => "session-flush", getLeafId: () => "leaf-flush" },
+  };
+
+  // 1. Initially read_context returns not found
+  const readRes1 = (await tools[0]!.execute(
+    "call-read-1" as never,
+    { action: "read_context" } as never,
+    new AbortController().signal as never,
+    undefined as never,
+    ctx as never,
+  )) as { details: { action: string; result: { message?: string } } };
+  assert.equal(readRes1.details.result.message, "No PROJECT_CONTEXT.md exists yet");
+
+  // 2. Execute flush action
+  const flushBody = [
+    "# Project Working Context",
+    "## Current Objective\n- Test extension flush action",
+    "## Negative Constraints / Do Not Assume\n- Do not assume test passes without check",
+    "## Next Action\n- Assert receipt",
+  ].join("\n");
+
+  const flushRes = (await tools[0]!.execute(
+    "call-flush" as never,
+    {
+      action: "flush",
+      content: flushBody,
+      covered_through_entry_id: "entry-ext-1",
+    } as never,
+    new AbortController().signal as never,
+    undefined as never,
+    ctx as never,
+  )) as { details: { action: string; result: { status: string; checkpoint_id: string } } };
+  assert.equal(flushRes.details.action, "flush");
+  assert.equal(flushRes.details.result.status, "FLUSH_VERIFIED");
+  assert.equal(flushRes.details.result.checkpoint_id, "CP-0001");
+
+  // 3. read_context now returns the flushed projection
+  const readRes2 = (await tools[0]!.execute(
+    "call-read-2" as never,
+    { action: "read_context" } as never,
+    new AbortController().signal as never,
+    undefined as never,
+    ctx as never,
+  )) as { details: { action: string; result: { metadata: { checkpoint_id: string } } } };
+  assert.equal(readRes2.details.result.metadata.checkpoint_id, "CP-0001");
+
+  // 4. Test /note-skills-flush command
+  // No args: reports current status
+  await commandHandlers.get("note-skills-flush")!("", ctx);
+  assert.ok(notifications.some((msg) => /Working context: CP-0001/.test(msg)));
+
+  // With args: flushes new revision
+  await commandHandlers.get("note-skills-flush")!("Execute next integration test", ctx);
+  assert.ok(notifications.some((msg) => /Flushed working context to CP-0002/.test(msg)));
 });

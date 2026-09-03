@@ -412,6 +412,9 @@ export type ErrorCode =
   | 'MISSING_CONFIG'
   | 'INCONSISTENT'
   | 'INTERNAL'
+  | 'CONTEXT_CONFLICT'
+  | 'BUDGET_EXCEEDED'
+  | 'CONTEXT_STALE'
 
 /** Typed error for the whole core. `details` carries structured info. */
 export class ProjectMemoryError extends Error {
@@ -434,4 +437,60 @@ export function asErrorCode(e: unknown): ErrorCode {
     if (c === 'ENOENT') return 'NOT_FOUND'
   }
   return 'INTERNAL'
+}
+
+/* ------------------------------------------------------------------ */
+/* L1 External Working Context (§v0.5.0 Architecture Contract)         */
+/* ------------------------------------------------------------------ */
+
+export const PROJECT_CONTEXT_FILENAME = 'PROJECT_CONTEXT.md'
+export const PROJECT_CONTEXT_MAX_BYTES = 5120 // 5KB hard limit
+export const CHECKPOINT_ID_RE = /^CP-\d{4,}$/
+
+export interface ProjectContextMetadata {
+  schema_version: number
+  project_id: string
+  authority: 'working_projection'
+  context_revision: number
+  checkpoint_id: string
+  source_session_id: string
+  /** Critical receipt: proves which conversation entry this checkpoint covers. */
+  covered_through_entry_id: string
+  git_branch?: string
+  git_head?: string
+  workspace_fingerprint?: string
+  base_context_sha256: string
+  generated_at: string
+}
+
+export interface ProjectContext {
+  metadata: ProjectContextMetadata
+  body: string
+  raw: string
+  sha256: string
+}
+
+export interface FlushReceipt {
+  schema_version: number
+  status: 'FLUSH_VERIFIED' | 'FLUSH_FAILED'
+  checkpoint_id: string
+  source_session_id: string
+  covered_through_entry_id: string
+  old_context_sha256: string
+  new_context_sha256: string
+  git_branch?: string
+  git_head?: string
+  workspace_fingerprint?: string
+  created_at: string
+  file: string
+}
+
+export interface FlushInput {
+  content: string
+  covered_through_entry_id: string
+  source_session_id?: string
+  base_context_sha256?: string
+  git_branch?: string
+  git_head?: string
+  workspace_fingerprint?: string
 }

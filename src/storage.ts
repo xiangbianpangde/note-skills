@@ -18,8 +18,25 @@ import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import * as yaml from 'yaml'
 
-import { TYPE_ABBR, isTerminal, ProjectMemoryError } from './model.ts'
-import type { ErrorCode, Note, NoteType, Trigger, TriggerCondition } from './model.ts'
+import {
+  TYPE_ABBR,
+  isTerminal,
+  ProjectMemoryError,
+  CHECKPOINT_ID_RE,
+  PROJECT_CONTEXT_FILENAME,
+  PROJECT_CONTEXT_MAX_BYTES,
+} from './model.ts'
+import type {
+  ErrorCode,
+  Note,
+  NoteType,
+  Trigger,
+  TriggerCondition,
+  ProjectContextMetadata,
+  ProjectContext,
+  FlushReceipt,
+  FlushInput,
+} from './model.ts'
 
 /* ------------------------------------------------------------------ */
 /* Layout (§15.3)                                                      */
@@ -33,6 +50,7 @@ export const BACKLINKS_DIR = 'backlinks'
 export const LOCKS_DIR = 'locks'
 export const APPROVALS_DIR = 'approvals'
 export const PENDING_DIR = 'pending'
+export const CHECKPOINTS_DIR = 'checkpoints'
 
 export const TYPE_DIR: Record<NoteType, string> = {
   deferred_work: 'deferred',
@@ -70,6 +88,26 @@ export function locksDir(cwd: string): string {
 
 export function approvalsDir(cwd: string): string {
   return path.join(memoryRoot(cwd), APPROVALS_DIR)
+}
+
+export function checkpointsDir(cwd: string): string {
+  return path.join(memoryRoot(cwd), CHECKPOINTS_DIR)
+}
+
+export function projectContextPath(cwd: string): string {
+  return path.join(cwd, PROJECT_CONTEXT_FILENAME)
+}
+
+export function checkpointPath(cwd: string, checkpointId: string): string {
+  return path.join(checkpointsDir(cwd), `${checkpointId}.md`)
+}
+
+export function flushReceiptPath(cwd: string, checkpointId: string): string {
+  return path.join(checkpointsDir(cwd), `${checkpointId}.receipt.json`)
+}
+
+export function contextLockPath(cwd: string): string {
+  return path.join(locksDir(cwd), 'context.lock')
 }
 
 export function pendingDir(cwd: string): string {
@@ -154,6 +192,7 @@ export function assertMemoryRootSafe(cwd: string): void {
     [locksDir(cwd), '.note-skills/locks'],
     [approvalsDir(cwd), '.note-skills/approvals'],
     [pendingDir(cwd), '.note-skills/pending'],
+    [checkpointsDir(cwd), '.note-skills/checkpoints'],
     ...TYPE_DIRS.map((d) => [path.join(notesRoot(cwd), d), `.note-skills/notes/${d}`] as [string, string]),
   ]
   for (const [abs, label] of targets) {
@@ -198,6 +237,7 @@ export function ensureMemoryDirs(cwd: string): void {
   fs.mkdirSync(locksDir(cwd), { recursive: true })
   fs.mkdirSync(approvalsDir(cwd), { recursive: true })
   fs.mkdirSync(pendingDir(cwd), { recursive: true })
+  fs.mkdirSync(checkpointsDir(cwd), { recursive: true })
 }
 
 /* ------------------------------------------------------------------ */
@@ -458,6 +498,16 @@ export function tryReadText(file: string): string | null {
   }
 }
 
+export function tryReadJson<T>(file: string): T | null {
+  const text = tryReadText(file)
+  if (text === null) return null
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return null
+  }
+}
+
 /** Atomic write: tmp file in the same dir + fsync + rename. */
 export function writeFileAtomic(file: string, content: string): void {
   const dir = path.dirname(file)
@@ -607,6 +657,144 @@ export function serializeNote(note: Note, body: string): string {
     .stringify(note as unknown as Record<string, unknown>, { defaultStringType: 'PLAIN' })
     .trimEnd()
   return `---\n${fm}\n---\n${body ?? ''}`
+}
+
+/* ------------------------------------------------------------------ */
+/* L1 Working Context Parsing / Serialization / Validation             */
+/* ------------------------------------------------------------------ */
+
+export function parseProjectContext(raw: string): {
+  metadata: ProjectContextMetadata
+  body: string
+} {
+  if (!raw.startsWith('---\n')) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT missing frontmatter opening delimiter')
+  }
+  const end = raw.indexOf('\n---', 4)
+  if (end < 0) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT unterminated frontmatter block')
+  }
+  const fmRaw = raw.slice(4, end)
+  const rest = raw.slice(end + 4).replace(/^\r?\n+/, '')
+  let parsed: unknown
+  try {
+    parsed = yaml.parse(fmRaw)
+  } catch (e) {
+    throw new ProjectMemoryError(
+      'INVALID_INPUT',
+      `PROJECT_CONTEXT frontmatter is not valid YAML: ${(e as Error).message}`,
+    )
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT frontmatter must be an object')
+  }
+  return { metadata: parsed as unknown as ProjectContextMetadata, body: rest }
+}
+
+export function serializeProjectContext(metadata: ProjectContextMetadata, body: string): string {
+  const fm = yaml
+    .stringify(metadata as unknown as Record<string, unknown>, { defaultStringType: 'PLAIN' })
+    .trimEnd()
+  return `---\n${fm}\n---\n\n${body.trim()}\n`
+}
+
+export function validateProjectContext(
+  context: { metadata: ProjectContextMetadata; body: string; raw: string },
+  expectedProjectId: string,
+): void {
+  const rawBytes = Buffer.byteLength(context.raw, 'utf8')
+  if (rawBytes > PROJECT_CONTEXT_MAX_BYTES) {
+    throw new ProjectMemoryError(
+      'BUDGET_EXCEEDED',
+      `PROJECT_CONTEXT size (${rawBytes} bytes) exceeds hard cap of ${PROJECT_CONTEXT_MAX_BYTES} bytes (5KB)`,
+      { bytes: rawBytes, max: PROJECT_CONTEXT_MAX_BYTES },
+    )
+  }
+  const m = context.metadata
+  if (m.schema_version !== 1) {
+    throw new ProjectMemoryError('INVALID_INPUT', `PROJECT_CONTEXT schema_version must be 1, got ${m.schema_version}`)
+  }
+  if (m.project_id !== expectedProjectId) {
+    throw new ProjectMemoryError(
+      'INVALID_INPUT',
+      `PROJECT_CONTEXT project_id mismatch: expected "${expectedProjectId}", got "${m.project_id}"`,
+      { expected: expectedProjectId, actual: m.project_id },
+    )
+  }
+  if (m.authority !== 'working_projection') {
+    throw new ProjectMemoryError(
+      'POLICY_VIOLATION',
+      `PROJECT_CONTEXT authority must be "working_projection" (§2), got "${m.authority}"`,
+      { authority: m.authority },
+    )
+  }
+  if (typeof m.context_revision !== 'number' || m.context_revision < 1) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT context_revision must be a positive integer')
+  }
+  if (!CHECKPOINT_ID_RE.test(m.checkpoint_id)) {
+    throw new ProjectMemoryError('INVALID_INPUT', `PROJECT_CONTEXT checkpoint_id must match ${CHECKPOINT_ID_RE}`)
+  }
+  if (!m.covered_through_entry_id || typeof m.covered_through_entry_id !== 'string') {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT covered_through_entry_id is required')
+  }
+
+  // Validate required sections in body (§3.3 Anti-Mini-Wiki Rules)
+  const lowerBody = context.body.toLowerCase()
+  const hasObjective = /##\s*current\s*objective/i.test(lowerBody)
+  const hasNextAction = /##\s*next\s*action/i.test(lowerBody)
+  const hasNegativeConstraints = /##\s*(?:negative\s*constraints|do\s*not\s*assume)/i.test(lowerBody)
+
+  if (!hasObjective) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT body is missing required "## Current Objective" section')
+  }
+  if (!hasNextAction) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT body is missing required "## Next Action" section')
+  }
+  if (!hasNegativeConstraints) {
+    throw new ProjectMemoryError(
+      'INVALID_INPUT',
+      'PROJECT_CONTEXT body is missing required "## Negative Constraints / Do Not Assume" section (§3.3)',
+    )
+  }
+}
+
+export function nextFreeCheckpointId(dir: string): string {
+  let names: string[] = []
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return 'CP-0001'
+  }
+  let maxSeq = 0
+  const re = /^CP-(\d{4,})\.md$/
+  for (const name of names) {
+    const m = re.exec(name)
+    if (m) {
+      const seq = parseInt(m[1] ?? '0', 10)
+      if (seq > maxSeq) maxSeq = seq
+    }
+  }
+  return `CP-${String(maxSeq + 1).padStart(4, '0')}`
+}
+
+export function readProjectContext(cwd: string): ProjectContext | null {
+  assertMemoryRootSafe(cwd)
+  const file = projectContextPath(cwd)
+  if (!fs.existsSync(file)) return null
+  rejectSymlinkComponents(cwd, file, PROJECT_CONTEXT_FILENAME)
+  const raw = tryReadText(file)
+  if (raw === null) return null
+  const { metadata, body } = parseProjectContext(raw)
+  const sha256 = sha256hex(raw)
+  return { metadata, body, raw, sha256 }
+}
+
+export function readFlushReceipt(cwd: string, checkpointId: string): FlushReceipt | null {
+  assertMemoryRootSafe(cwd)
+  const file = flushReceiptPath(cwd, checkpointId)
+  if (!fs.existsSync(file)) return null
+  rejectSymlinkComponents(cwd, file, `checkpoints/${checkpointId}.receipt.json`)
+  return tryReadJson<FlushReceipt>(file)
 }
 
 /** All note file paths across the six type directories (sorted, stable). */

@@ -1,6 +1,6 @@
 {
   "name": "note-skills",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "description": "Filesystem-first prospective note skills for Pi with capture gates, trigger-based retrieval, content-bound promotion approval, and reconciliation.",
   "type": "module",
   "keywords": [
@@ -42,7 +42,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": ">=0.84.2",
+    "@earendil-works/pi-coding-agent": ">=0.84.4",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },

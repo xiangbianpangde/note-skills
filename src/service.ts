@@ -67,6 +67,10 @@ import type {
   BacklinkMode,
   Note,
   ScannedNote,
+  ProjectContextMetadata,
+  ProjectContext,
+  FlushReceipt,
+  FlushInput,
 } from './model.ts'
 import {
   assertProjectDir,
@@ -105,6 +109,19 @@ import {
   pendingLockPath,
   acquireLockFile,
   releaseLockFile,
+  checkpointsDir,
+  projectContextPath,
+  checkpointPath,
+  flushReceiptPath,
+  contextLockPath,
+  parseProjectContext,
+  serializeProjectContext,
+  validateProjectContext,
+  nextFreeCheckpointId,
+  readProjectContext,
+  readFlushReceipt,
+  ensureMemoryDirs,
+  assertMemoryRootSafe,
 } from './storage.ts'
 import type { ConfigFile, ScannedRaw, ScanIssue, IndexSnapshot } from './storage.ts'
 
@@ -2107,6 +2124,162 @@ export class ProjectMemory {
     }
   }
 
+  /* ---------------- L1 Working Context (§v0.5.0 Contract) ---------------- */
+
+  /**
+   * Two-phase commit flush for L1 working context (§4 of Architecture Contract).
+   * Phase 1 (Prepare): validate input, budget, required sections, secret scan, CAS.
+   * Phase 2 (Commit): acquire context.lock, write CP-xxxx snapshot, write root
+   * PROJECT_CONTEXT.md, readback verify, write FlushReceipt with FLUSH_VERIFIED.
+   */
+  flushWorkingContext(input: FlushInput): FlushReceipt {
+    const cfg = readConfig(this.cwd)
+    assertProjectDir(this.cwd)
+    assertMemoryRootSafe(this.cwd)
+
+    if (!input.content || typeof input.content !== 'string' || input.content.trim() === '') {
+      throw new ProjectMemoryError('INVALID_INPUT', 'FlushInput.content must be a non-empty string')
+    }
+    if (
+      !input.covered_through_entry_id ||
+      typeof input.covered_through_entry_id !== 'string' ||
+      input.covered_through_entry_id.trim() === ''
+    ) {
+      throw new ProjectMemoryError('INVALID_INPUT', 'FlushInput.covered_through_entry_id is required and non-empty')
+    }
+
+    // Phase 1: Prepare
+    // Extract body from content (supporting either raw body or frontmattered text)
+    let body = input.content.trim()
+    if (body.startsWith('---\n')) {
+      try {
+        const parsed = parseProjectContext(body)
+        body = parsed.body
+      } catch {
+        // If frontmatter parsing fails, treat it as body and let validation catch issues
+      }
+    }
+
+    // Check secrets on body
+    const secretHits = findSecretMatches({ body }, secretRulesFor(cfg), '$workingContext')
+    if (secretHits.length) {
+      throw new ProjectMemoryError(
+        'POLICY_VIOLATION',
+        'PROJECT_CONTEXT body violates secret policy (no credentials/tokens in working context)',
+        { matched: secretHits.map((hit) => `${hit.rule}@${hit.path}`) },
+      )
+    }
+
+    const currentContext = readProjectContext(this.cwd)
+    const currentSha256 = currentContext ? currentContext.sha256 : ''
+
+    // CAS check if base_context_sha256 is explicitly provided
+    if (input.base_context_sha256 !== undefined && input.base_context_sha256 !== currentSha256) {
+      throw new ProjectMemoryError(
+        'CONTEXT_CONFLICT',
+        `PROJECT_CONTEXT was modified concurrently (expected base "${input.base_context_sha256}", actual current "${currentSha256}")`,
+        { expected: input.base_context_sha256, actual: currentSha256 },
+      )
+    }
+
+    const nextRevision = (currentContext?.metadata.context_revision ?? 0) + 1
+    const checkpointId = nextFreeCheckpointId(checkpointsDir(this.cwd))
+    const nowIso = new Date().toISOString()
+
+    const metadata: ProjectContextMetadata = {
+      schema_version: 1,
+      project_id: cfg.project_id,
+      authority: 'working_projection',
+      context_revision: nextRevision,
+      checkpoint_id: checkpointId,
+      source_session_id: input.source_session_id ?? 'unknown-session',
+      covered_through_entry_id: input.covered_through_entry_id,
+      git_branch: input.git_branch,
+      git_head: input.git_head,
+      workspace_fingerprint: input.workspace_fingerprint,
+      base_context_sha256: currentSha256,
+      generated_at: nowIso,
+    }
+
+    const fullMarkdown = serializeProjectContext(metadata, body)
+    const fullSha256 = sha256hex(fullMarkdown)
+
+    // Validate size budget, schema, and required sections
+    validateProjectContext({ metadata, body, raw: fullMarkdown }, cfg.project_id)
+
+    // Phase 2: Commit with Lock
+    ensureMemoryDirs(this.cwd)
+    const lock = contextLockPath(this.cwd)
+    const lockFd = acquireLockFile(lock, { checkpoint_id: checkpointId, action: 'flush' }, { waitMs: 5000 })
+    try {
+      // Re-verify CAS under lock
+      const lockedCurrent = readProjectContext(this.cwd)
+      const lockedSha256 = lockedCurrent ? lockedCurrent.sha256 : ''
+      if (lockedSha256 !== currentSha256) {
+        throw new ProjectMemoryError(
+          'CONTEXT_CONFLICT',
+          `concurrent edit detected under lock (expected "${currentSha256}", observed "${lockedSha256}")`,
+          { expected: currentSha256, actual: lockedSha256 },
+        )
+      }
+
+      // Write checkpoint snapshot first (INV-FLUSH-01)
+      const cpFile = checkpointPath(this.cwd, checkpointId)
+      writeFileAtomic(cpFile, fullMarkdown)
+
+      // Write root PROJECT_CONTEXT.md
+      const ctxFile = projectContextPath(this.cwd)
+      writeFileAtomic(ctxFile, fullMarkdown)
+
+      // Read back & verify
+      const readback = tryReadText(ctxFile)
+      if (readback === null || sha256hex(readback) !== fullSha256) {
+        throw new ProjectMemoryError('INTERNAL', 'readback verification of flushed PROJECT_CONTEXT failed')
+      }
+
+      // Write FlushReceipt
+      const receipt: FlushReceipt = {
+        schema_version: 1,
+        status: 'FLUSH_VERIFIED',
+        checkpoint_id: checkpointId,
+        source_session_id: metadata.source_session_id,
+        covered_through_entry_id: metadata.covered_through_entry_id,
+        old_context_sha256: currentSha256,
+        new_context_sha256: fullSha256,
+        git_branch: metadata.git_branch,
+        git_head: metadata.git_head,
+        workspace_fingerprint: metadata.workspace_fingerprint,
+        created_at: nowIso,
+        file: ctxFile,
+      }
+      const receiptFile = flushReceiptPath(this.cwd, checkpointId)
+      writeFileAtomic(receiptFile, JSON.stringify(receipt, null, 2))
+
+      return receipt
+    } finally {
+      releaseLockFile(lock, lockFd)
+    }
+  }
+
+  readWorkingContext(): ProjectContext | null {
+    assertProjectDir(this.cwd)
+    return readProjectContext(this.cwd)
+  }
+
+  verifyFlushReceipt(checkpointId: string): FlushReceipt | null {
+    assertProjectDir(this.cwd)
+    const receipt = readFlushReceipt(this.cwd, checkpointId)
+    if (!receipt) return null
+    if (receipt.status !== 'FLUSH_VERIFIED') return null
+    // Verify checkpoint file exists and hash matches
+    const cpFile = checkpointPath(this.cwd, checkpointId)
+    const cpText = tryReadText(cpFile)
+    if (cpText === null || sha256hex(cpText) !== receipt.new_context_sha256) {
+      return null
+    }
+    return receipt
+  }
+
   /* ---------------- index (§15.3) ---------------- */
 
   rebuildIndex(): { notes: number; triggers: number } {
@@ -3303,4 +3476,16 @@ export function reconcile(cwd: string, opts?: { fixIndex?: boolean }): Reconcile
 
 export function rebuildIndex(cwd: string): { notes: number; triggers: number } {
   return new ProjectMemory(cwd).rebuildIndex()
+}
+
+export function flushWorkingContext(cwd: string, input: FlushInput): FlushReceipt {
+  return new ProjectMemory(cwd).flushWorkingContext(input)
+}
+
+export function readWorkingContext(cwd: string): ProjectContext | null {
+  return new ProjectMemory(cwd).readWorkingContext()
+}
+
+export function verifyFlushReceipt(cwd: string, checkpointId: string): FlushReceipt | null {
+  return new ProjectMemory(cwd).verifyFlushReceipt(checkpointId)
 }
