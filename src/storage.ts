@@ -698,6 +698,26 @@ export function serializeProjectContext(metadata: ProjectContextMetadata, body: 
   return `---\n${fm}\n---\n\n${body.trim()}\n`
 }
 
+export function isValidIsoTimestamp(ts: string): boolean {
+  if (typeof ts !== 'string') return false
+  const ISO_FORMAT_RE = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/
+  if (!ISO_FORMAT_RE.test(ts)) return false
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return false
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ts)
+  if (m) {
+    const y = parseInt(m[1]!, 10)
+    const mon = parseInt(m[2]!, 10)
+    const day = parseInt(m[3]!, 10)
+    if (ts.endsWith('Z')) {
+      if (date.getUTCFullYear() !== y || (date.getUTCMonth() + 1) !== mon || date.getUTCDate() !== day) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
 export function validateProjectContext(
   context: { metadata: ProjectContextMetadata; body: string; raw: string },
   expectedProjectId: string,
@@ -747,8 +767,7 @@ export function validateProjectContext(
       'PROJECT_CONTEXT base_context_sha256 must be empty or 64 hex characters',
     )
   }
-  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
-  if (typeof m.generated_at !== 'string' || !ISO_RE.test(m.generated_at)) {
+  if (typeof m.generated_at !== 'string' || !isValidIsoTimestamp(m.generated_at)) {
     throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT generated_at must be valid ISO-8601 timestamp')
   }
   if (m.git_branch !== undefined && (typeof m.git_branch !== 'string' || !/^[a-zA-Z0-9_\-./]+$/.test(m.git_branch))) {
@@ -824,7 +843,7 @@ export function validateProjectContext(
         'PROJECT_CONTEXT negative_constraints_relaxation.checkpoint_id is invalid (must match CP-xxxx)',
       )
     }
-    if (typeof r.timestamp !== 'string' || !ISO_RE.test(r.timestamp)) {
+    if (typeof r.timestamp !== 'string' || !isValidIsoTimestamp(r.timestamp)) {
       throw new ProjectMemoryError(
         'INVALID_INPUT',
         'PROJECT_CONTEXT negative_constraints_relaxation.timestamp must be a valid ISO-8601 string',
@@ -838,11 +857,11 @@ export function validateProjectContext(
     }
     if (
       typeof r.previous_context_sha256 !== 'string' ||
-      !/^[0-9a-f]{64}$/i.test(r.previous_context_sha256)
+      !/^[0-9a-f]{64}$/.test(r.previous_context_sha256)
     ) {
       throw new ProjectMemoryError(
         'INVALID_INPUT',
-        'PROJECT_CONTEXT negative_constraints_relaxation.previous_context_sha256 must be a 64-hex SHA-256 hash',
+        'PROJECT_CONTEXT negative_constraints_relaxation.previous_context_sha256 must be a 64-hex lowercase SHA-256 hash',
       )
     }
     if (typeof r.reason !== 'string' || !isSubstantiveRelaxationReason(r.reason)) {
@@ -953,7 +972,7 @@ export function extractSubstantiveConstraintSet(body: string): Set<string> {
 
 export function isGibberishToken(token: string): boolean {
   const t = token.toLowerCase().replace(/[^a-z]/g, '')
-  if (!t) return false
+  if (!t) return true // empty letter component is invalid
   // Repetitive characters: e.g. "xxxx", "aaaa"
   if (/(.)\1{2,}/.test(t)) return true
   // Keyboard smash sequences: asdf, qwer, zxcv, uiop, hjkl, etc.
@@ -971,26 +990,20 @@ export function isSubstantiveRelaxationReason(reason: string): boolean {
   if (trimmed.length < 15) return false
 
   if (/[\u4e00-\u9fa5]/.test(trimmed)) {
-    if (trimmed.length < 10) return false
-    const uniqueChars = new Set([...trimmed.replace(/[^\u4e00-\u9fa5]/g, '')])
+    const hanChars = trimmed.match(/[\u4e00-\u9fa5]/g) ?? []
+    if (hanChars.length < 6) return false
+    const uniqueChars = new Set(hanChars)
     if (uniqueChars.size < 5) return false
     if (/^(?:测试|占位|暂无|无理由|跳过|忽略)+$/i.test(trimmed)) return false
     return true
   }
 
-  const tokens = trimmed.split(/\s+/)
+  const tokens = trimmed.split(/\s+/).filter(Boolean)
   if (tokens.length < 3) return false
 
-  // Reject if any token is a keyboard smash or gibberish
-  for (const token of tokens) {
-    if (isGibberishToken(token)) {
-      return false
-    }
-  }
-
-  const uniqueTokens = new Set(tokens.map((t) => t.toLowerCase()))
-  if (uniqueTokens.size <= 1) return false
-
+  // Positive structural check:
+  // Every token must contain at least one letter, must not be purely numbers/symbols,
+  // and must not be a keyboard smash / gibberish token.
   const placeholderTokens = new Set([
     'none', 'n/a', 'na', 'nil', 'null', 'tbd', 'todo', 'test', 'testing',
     'placeholder', 'dummy', 'not', 'valid', 'reason', 'reasons', 'no',
@@ -998,11 +1011,31 @@ export function isSubstantiveRelaxationReason(reason: string): boolean {
     'clear', 'at', 'all', 'any', 'some', 'thing', 'text', 'sample', 'foo', 'bar'
   ])
 
-  const nonPlaceholderTokens = tokens.filter(
-    (t) => !placeholderTokens.has(t.toLowerCase().replace(/[^a-z0-9]/g, ''))
-  )
+  const substantiveWords: string[] = []
+  for (const token of tokens) {
+    if (!/[a-zA-Z]/.test(token)) {
+      return false
+    }
+    const letters = token.toLowerCase().replace(/[^a-z]/g, '')
+    if (letters.length < 2 && !['a', 'i'].includes(letters)) {
+      return false
+    }
+    if (isGibberishToken(token)) {
+      return false
+    }
+    const isWord = /[aeiouy]/.test(letters) || ['by', 'my', 'rfc', 'sync', 'grpc', 'http'].includes(letters)
+    if (!isWord) {
+      return false
+    }
+    if (!placeholderTokens.has(letters)) {
+      substantiveWords.push(letters)
+    }
+  }
 
-  return nonPlaceholderTokens.length >= 2
+  if (substantiveWords.length < 2) return false
+  if (new Set(substantiveWords).size < 2) return false
+
+  return true
 }
 
 export function containsSubstantiveConstraint(text: string): boolean {

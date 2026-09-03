@@ -250,6 +250,8 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     "asdf qwer zxcvbnm",
     "xxxx policy qwer",
     "asdfg ghjkl zxcvb",
+    "123456 789012 345678",
+    "policy 123456 789012",
   ];
 
   for (const invalidReason of invalidReasons) {
@@ -312,8 +314,12 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
   // 3c: Schema strict closed validation for negative_constraints_relaxation (Sol audit P1-NEGATIVE-WIPEOUT-B)
   const schemaAttackAudits = [
     { ...relaxed.negative_constraints_relaxation, timestamp: 123 },
+    { ...relaxed.negative_constraints_relaxation, timestamp: "2026-99-99T99:99:99Z" },
+    { ...relaxed.negative_constraints_relaxation, timestamp: "2026-02-31T12:00:00Z" },
     { ...relaxed.negative_constraints_relaxation, actor: "" },
+    { ...relaxed.negative_constraints_relaxation, actor: null },
     { ...relaxed.negative_constraints_relaxation, previous_context_sha256: "not-a-sha" },
+    { ...relaxed.negative_constraints_relaxation, previous_context_sha256: "A".repeat(64) },
     { ...relaxed.negative_constraints_relaxation, removed_constraints: [123, null] },
     { ...relaxed.negative_constraints_relaxation, extra_forged_field: "injected" },
   ];
