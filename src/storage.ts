@@ -702,19 +702,21 @@ export function isValidIsoTimestamp(ts: string): boolean {
   if (typeof ts !== 'string') return false
   const ISO_FORMAT_RE = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/
   if (!ISO_FORMAT_RE.test(ts)) return false
+
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ts)
+  if (!m) return false
+  const year = parseInt(m[1]!, 10)
+  const month = parseInt(m[2]!, 10)
+  const day = parseInt(m[3]!, 10)
+
+  // Real Gregorian calendar validation (independent of timezone / offset)
+  const isLeap = (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0)
+  const daysInMonth = [0, 31, isLeap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  if (day > daysInMonth[month]!) return false
+
   const date = new Date(ts)
   if (Number.isNaN(date.getTime())) return false
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ts)
-  if (m) {
-    const y = parseInt(m[1]!, 10)
-    const mon = parseInt(m[2]!, 10)
-    const day = parseInt(m[3]!, 10)
-    if (ts.endsWith('Z')) {
-      if (date.getUTCFullYear() !== y || (date.getUTCMonth() + 1) !== mon || date.getUTCDate() !== day) {
-        return false
-      }
-    }
-  }
+
   return true
 }
 
@@ -994,7 +996,18 @@ export function isSubstantiveRelaxationReason(reason: string): boolean {
     if (hanChars.length < 6) return false
     const uniqueChars = new Set(hanChars)
     if (uniqueChars.size < 5) return false
-    if (/^(?:测试|占位|暂无|无理由|跳过|忽略)+$/i.test(trimmed)) return false
+
+    // Normalize Han text by stripping all punctuation, whitespace, and symbols
+    const hanNormalized = hanChars.join('')
+
+    // Strip known placeholder words
+    const placeholderHanWords = /(?:测试|占位|暂无|无理由|跳过|忽略|占位符|没有|约束|限制|原因|理由|随意|直接|解除|删除|放宽|无所谓|随便)/g
+    const substantiveHan = hanNormalized.replace(placeholderHanWords, '')
+
+    // Must have at least 6 substantive non-placeholder Han characters and at least 4 unique ones
+    if (substantiveHan.length < 6) return false
+    if (new Set([...substantiveHan]).size < 4) return false
+
     return true
   }
 

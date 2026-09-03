@@ -252,6 +252,10 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     "asdfg ghjkl zxcvb",
     "123456 789012 345678",
     "policy 123456 789012",
+    "测试 占位 忽略 占位 测试 占位",
+    "测试，占位，暂无，跳过，忽略",
+    "测试测试测试测试测试测试",
+    "占位符占位符占位符",
   ];
 
   for (const invalidReason of invalidReasons) {
@@ -316,6 +320,10 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     { ...relaxed.negative_constraints_relaxation, timestamp: 123 },
     { ...relaxed.negative_constraints_relaxation, timestamp: "2026-99-99T99:99:99Z" },
     { ...relaxed.negative_constraints_relaxation, timestamp: "2026-02-31T12:00:00Z" },
+    { ...relaxed.negative_constraints_relaxation, timestamp: "2026-02-31T12:00:00+08:00" },
+    { ...relaxed.negative_constraints_relaxation, timestamp: "2025-02-29T12:00:00+08:00" },
+    { ...relaxed.negative_constraints_relaxation, timestamp: "2026-02-31T12:00:00-05:00" },
+    { ...relaxed.negative_constraints_relaxation, timestamp: "2026-04-31T12:00:00+08:00" },
     { ...relaxed.negative_constraints_relaxation, actor: "" },
     { ...relaxed.negative_constraints_relaxation, actor: null },
     { ...relaxed.negative_constraints_relaxation, previous_context_sha256: "not-a-sha" },
