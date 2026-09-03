@@ -153,6 +153,48 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
   const cp2 = pm.readWorkingContext();
   assert.equal(cp2?.metadata.checkpoint_id, "CP-0002");
   assert.match(cp2!.body, /Do not deploy before security audit/, "CP-0002 must inherit negative constraints from CP-0001");
+
+  // Attack 2: Real negative constraints with "Not ...", "No ...", "无 ...", "没有 ..." MUST NOT be misclassified as non-substantive
+  const realConstraints = [
+    "- Not allowed to deploy before security audit",
+    "- No direct writes to production db",
+    "- 无管理员批准不得部署",
+    "- 没有测试覆盖的代码禁止合并",
+  ];
+
+  let currentSha = cp2!.sha256;
+  for (let i = 0; i < realConstraints.length; i++) {
+    const realConstraint = realConstraints[i];
+    // Updating to a real constraint must succeed
+    const res = pm.flushWorkingContext({
+      content: validContextBody("Refactor storage", "Implement write locks", realConstraint),
+      covered_through_entry_id: `turn-002-real-${i}`,
+      base_context_sha256: currentSha,
+    });
+    currentSha = res.new_context_sha256;
+
+    // Verify it is indeed recognized as substantive
+    const read = pm.readWorkingContext();
+    assert.ok(read);
+    assert.match(read.body, new RegExp(realConstraint.replace(/^-\s*/, "")));
+
+    // Attempting to wipe this real constraint with "none" or "无" must throw POLICY_VIOLATION
+    assert.throws(
+      () =>
+        pm.flushWorkingContext({
+          content: validContextBody("Refactor storage", "Implement write locks", "- none"),
+          covered_through_entry_id: `turn-002-wipe-${i}`,
+          base_context_sha256: currentSha,
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof ProjectMemoryError);
+        assert.equal(err.code, "POLICY_VIOLATION");
+        assert.match(err.message, /silent deletion of negative constraints is forbidden/);
+        return true;
+      },
+      `Attempt to wipe real constraint "${realConstraint}" with "- none" must be rejected`,
+    );
+  }
 });
 
 test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV-AUTH-02 arbitration)", () => {

@@ -812,11 +812,16 @@ export function containsSubstantiveConstraint(text: string): boolean {
     .map((l) => l.replace(/^[-*•\d.\s]+/, '').trim())
     .filter(Boolean)
   if (lines.length === 0) return false
-  // Filter out any line that merely declares absence of constraints:
-  // e.g. "none specified", "nothing specified", "no constraints", "constraints: none", "n.a.", "n/a", "无任何限制", "暂无", "无约束", etc.
-  const nonConstraintPattern =
-    /^(?:constraints?[:：]?\s*)?(?:none|nothing|no(?:\s+|$)|not(?:\s+|$)|n[\/.]?a[\/.]?|nil|empty|null|无|暂无|没有|未指定|无任何|无特别|不适用|尚无)[\s\S]*$/i
-  const substantive = lines.filter((line) => !nonConstraintPattern.test(line) && line.length >= 3)
+
+  // Match ONLY closed-set declarations of absence of constraints.
+  // NEVER use wildcards like "no .*", "not .*", "无.*", or "没有.*" which swallow real negative constraints!
+  const absenceOfConstraintsPattern =
+    /^(?:(?:(?:negative\s+)?constraints?|notes?|(?:负向)?(?:约束|限制|要求))[:：]\s*)?(?:none(?:\s+(?:specified|reported|currently|at\s+this\s+time|yet|known))?|nothing(?:\s+(?:specified|here|to\s+report|yet))?|no(?:\s+(?:known\s+)?(?:negative\s+)?(?:constraints?|special\s+constraints?|limitations?|restrictions?|assumptions?))|not(?:\s+(?:specified|applicable|defined|known))|there\s+are\s+no\s+(?:known\s+)?(?:negative\s+)?(?:constraints?|limitations?|restrictions?)|n[\/.]?a[\/.]?|nil|empty|null|tbd|todo|none\.|n\/a\.|无|暂无|没有|未指定|不适用|尚无|空|无(?:任何)?(?:负向)?(?:特别)?(?:约束|限制|要求)|暂无(?:任何)?(?:负向)?(?:特别)?(?:约束|限制|要求)|没有(?:发现)?(?:任何)?(?:负向)?(?:特别)?(?:约束|限制|要求)|未指定(?:约束|限制|要求)?)[.!?。！？\s]*$/i
+
+  const substantive = lines.filter((line) => {
+    if (line.length < 3) return false
+    return !absenceOfConstraintsPattern.test(line)
+  })
   return substantive.length > 0
 }
 
