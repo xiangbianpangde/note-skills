@@ -207,34 +207,102 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     );
   }
 
-  // Behavior 3: Explicit, auditable relaxation reason allows removing/modifying negative constraints
-  // 3a: Trivial reason is rejected
-  assert.throws(
-    () =>
-      pm.flushWorkingContext({
-        content: validContextBody("Refactor storage", "Implement write locks", "- None specified"),
-        covered_through_entry_id: "turn-002-relax-trivial",
-        base_context_sha256: currentSha,
-        relax_negative_constraints_reason: "n/a",
-      }),
-    (err: unknown) => {
-      assert.ok(err instanceof ProjectMemoryError);
-      assert.equal(err.code, "POLICY_VIOLATION");
-      return true;
-    },
-    "Trivial relaxation reason (< 8 chars) must be rejected",
-  );
+  // Attack 3: Substring-presence semantic bypass attempts must be rejected (Sol audit P1-NEGATIVE-WIPEOUT-A)
+  // Even though the old constraint string appears in the text, it is not an active constraint.
+  const substringBypassAttempts = [
+    "- This constraint is NO LONGER ACTIVE: Do not deploy before security audit",
+    "- Historical/removed constraint: Do not deploy before security audit",
+    "- ~~Do not deploy before security audit~~",
+    "- Ignore the following old rule: Do not deploy before security audit",
+    "<!-- Do not deploy before security audit -->",
+    "## Negative Constraints / Do Not Assume\n<!-- Do not deploy before security audit -->\n- None specified",
+  ];
 
-  // 3b: Substantive auditable reason is accepted
+  for (const bypass of substringBypassAttempts) {
+    assert.throws(
+      () =>
+        pm.flushWorkingContext({
+          content: validContextBody("Refactor storage", "Implement write locks", bypass),
+          covered_through_entry_id: "turn-002-bypass",
+          base_context_sha256: currentSha,
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof ProjectMemoryError);
+        assert.equal(err.code, "POLICY_VIOLATION");
+        assert.match(err.message, /silent deletion or relaxation of negative constraints is forbidden/);
+        return true;
+      },
+      `Substring bypass attempt "${bypass}" must be rejected`,
+    );
+  }
+
+  // Behavior 3: Explicit, auditable relaxation authorization (Sol audit P1-NEGATIVE-WIPEOUT-B)
+  // 3a: Trivial reason / long placeholder / gibberish is rejected
+  const invalidReasons = [
+    "n/a",
+    "none none none none",
+    "xxxxxxxxxxxxxxxxxxxx",
+    "placeholder placeholder",
+    "not valid reason at all",
+    "dummy dummy dummy",
+  ];
+
+  for (const invalidReason of invalidReasons) {
+    assert.throws(
+      () =>
+        pm.flushWorkingContext({
+          content: validContextBody("Refactor storage", "Implement write locks", "- None specified"),
+          covered_through_entry_id: "turn-002-relax-trivial",
+          base_context_sha256: currentSha,
+          relax_negative_constraints: { reason: invalidReason, approved_by: "alice" },
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof ProjectMemoryError);
+        assert.equal(err.code, "POLICY_VIOLATION");
+        return true;
+      },
+      `Trivial or placeholder relaxation reason "${invalidReason}" must be rejected`,
+    );
+  }
+
+  // 3b: Substantive auditable reason is accepted and recorded in both receipt & metadata
+  const relaxationReason = "Security audit successfully completed and signed off by lead architect";
   const relaxed = pm.flushWorkingContext({
     content: validContextBody("Refactor storage", "Implement write locks", "- None specified"),
     covered_through_entry_id: "turn-002-relax-approved",
     base_context_sha256: currentSha,
-    relax_negative_constraints_reason: "Security audit successfully completed and signed off by lead architect",
+    relax_negative_constraints: {
+      reason: relaxationReason,
+      approved_by: "sec-lead-alice",
+    },
   });
   assert.equal(relaxed.status, "FLUSH_VERIFIED");
+  assert.ok(relaxed.negative_constraints_relaxation);
+  assert.equal(relaxed.negative_constraints_relaxation.actor, "sec-lead-alice");
+  assert.equal(relaxed.negative_constraints_relaxation.reason, relaxationReason);
+  assert.ok(relaxed.negative_constraints_relaxation.removed_constraints.length > 0);
+  assert.equal(relaxed.negative_constraints_relaxation.previous_context_sha256, currentSha);
+
   const cpRelaxed = pm.readWorkingContext();
+  assert.ok(cpRelaxed);
   assert.match(cpRelaxed!.body, /None specified/);
+  assert.ok(cpRelaxed!.metadata.negative_constraints_relaxation);
+  assert.equal(
+    cpRelaxed!.metadata.negative_constraints_relaxation.reason,
+    relaxationReason,
+  );
+  assert.equal(
+    cpRelaxed!.metadata.negative_constraints_relaxation.actor,
+    "sec-lead-alice",
+  );
+
+  // Cross-verification in verifyFlushReceipt
+  const verifiedReceipt = pm.verifyFlushReceipt(relaxed.checkpoint_id);
+  assert.ok(verifiedReceipt);
+  assert.deepEqual(
+    verifiedReceipt?.negative_constraints_relaxation,
+    relaxed.negative_constraints_relaxation,
+  );
 });
 
 test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV-AUTH-02 arbitration)", () => {

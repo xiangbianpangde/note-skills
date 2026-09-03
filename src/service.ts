@@ -71,6 +71,7 @@ import type {
   ProjectContext,
   FlushReceipt,
   FlushInput,
+  NegativeConstraintsRelaxationAudit,
 } from './model.ts'
 import {
   assertProjectDir,
@@ -124,7 +125,9 @@ import {
   assertMemoryRootSafe,
   extractNegativeConstraints,
   extractSubstantiveConstraints,
+  extractSubstantiveConstraintSet,
   normalizeConstraint,
+  isSubstantiveRelaxationReason,
   tryReadGitIdentity,
 } from './storage.ts'
 import type { ConfigFile, ScannedRaw, ScanIssue, IndexSnapshot } from './storage.ts'
@@ -2167,6 +2170,11 @@ export class ProjectMemory {
     const currentContext = readProjectContext(this.cwd)
     const currentSha256 = currentContext ? currentContext.sha256 : ''
 
+    const nextRevision = (currentContext?.metadata.context_revision ?? 0) + 1
+    const checkpointId = nextFreeCheckpointId(checkpointsDir(this.cwd))
+    const nowIso = new Date().toISOString()
+    let relaxationAudit: NegativeConstraintsRelaxationAudit | undefined
+
     // CAS check (Item 3 & P1-3): mandatory when updating an existing context
     if (currentContext) {
       if (!input.base_context_sha256 || typeof input.base_context_sha256 !== 'string' || input.base_context_sha256.trim() === '') {
@@ -2184,37 +2192,50 @@ export class ProjectMemory {
         )
       }
 
-      // Negative constraints protection (INV-AUTH-02 & Sol review):
-      // Mandatory preservation check: Any substantive negative constraints in the previous context
-      // MUST be preserved in the new context, unless explicit auditable relaxation is provided.
-      const prevConstraints = extractSubstantiveConstraints(currentContext.body)
-      if (prevConstraints.length > 0) {
-        const newNegativeMatch = body.match(
-          /##\s*(?:negative\s*constraints|do\s*not\s*assume)(?:\s*[/|]\s*(?:negative\s*constraints|do\s*not\s*assume))?\s*\n+([\s\S]*?)(?=\n+##|$)/i,
-        )
-        const newNegativeContent = newNegativeMatch?.[1]?.trim() ?? ''
-        const normalizedNewSection = newNegativeContent.toLowerCase().replace(/\s+/g, ' ')
-
-        const missingConstraints = prevConstraints.filter((prev) => {
-          const normPrev = normalizeConstraint(prev)
-          if (!normPrev) return false
-          return !normalizedNewSection.includes(normPrev)
-        })
+      // Negative constraints protection (INV-AUTH-02 & Sol audit):
+      // Strict Active Constraint Set-Inclusion: prevActiveSet ⊆ newActiveSet
+      const prevActiveSet = extractSubstantiveConstraintSet(currentContext.body)
+      if (prevActiveSet.size > 0) {
+        const newActiveSet = extractSubstantiveConstraintSet(body)
+        const missingConstraints: string[] = []
+        for (const prevConstraint of prevActiveSet) {
+          if (!newActiveSet.has(prevConstraint)) {
+            missingConstraints.push(prevConstraint)
+          }
+        }
 
         if (missingConstraints.length > 0) {
-          const hasExplicitRelaxation =
-            typeof input.relax_negative_constraints_reason === 'string' &&
-            input.relax_negative_constraints_reason.trim().length >= 8
+          const relaxationRaw = input.relax_negative_constraints ?? input.relax_negative_constraints_reason
+          let reason: string | undefined
+          let approvedBy: string | undefined
 
-          if (!hasExplicitRelaxation) {
+          if (typeof relaxationRaw === 'string') {
+            reason = relaxationRaw.trim()
+          } else if (typeof relaxationRaw === 'object' && relaxationRaw !== null) {
+            reason = typeof relaxationRaw.reason === 'string' ? relaxationRaw.reason.trim() : undefined
+            approvedBy = typeof relaxationRaw.approved_by === 'string' ? relaxationRaw.approved_by.trim() : undefined
+          }
+
+          // Validate that the reason is substantive, not a trivial placeholder or gibberish
+          if (!reason || !isSubstantiveRelaxationReason(reason)) {
             throw new ProjectMemoryError(
               'POLICY_VIOLATION',
-              `silent deletion or relaxation of negative constraints is forbidden: previous context had active constraints that were not preserved in the new context. Missing: ${missingConstraints.map((c) => `"${c}"`).join(', ')}. To relax or remove constraints, supply an auditable relax_negative_constraints_reason (§3.3)`,
+              `silent deletion or relaxation of negative constraints is forbidden: previous context had active constraints that were not preserved in the new context. Missing: ${missingConstraints.map((c) => `"${c}"`).join(', ')}. To relax or remove constraints, supply an auditable, substantive relaxation reason (at least 15 characters and substantive justification explaining the policy change) (§3.4)`,
               {
                 missing_constraints: missingConstraints,
-                previous_constraints: prevConstraints,
+                previous_constraints: [...prevActiveSet],
+                provided_reason: reason,
               },
             )
+          }
+
+          relaxationAudit = {
+            checkpoint_id: checkpointId,
+            timestamp: nowIso,
+            actor: approvedBy ?? input.source_session_id ?? 'unknown_session',
+            previous_context_sha256: currentSha256,
+            reason: reason,
+            removed_constraints: missingConstraints,
           }
         }
       }
@@ -2235,10 +2256,6 @@ export class ProjectMemory {
     const gitBranch = input.git_branch ?? gitInfo.branch
     const gitHead = input.git_head ?? gitInfo.head
 
-    const nextRevision = (currentContext?.metadata.context_revision ?? 0) + 1
-    const checkpointId = nextFreeCheckpointId(checkpointsDir(this.cwd))
-    const nowIso = new Date().toISOString()
-
     const metadata: ProjectContextMetadata = {
       schema_version: 1,
       project_id: cfg.project_id,
@@ -2252,6 +2269,7 @@ export class ProjectMemory {
       workspace_fingerprint: input.workspace_fingerprint,
       base_context_sha256: currentSha256,
       generated_at: nowIso,
+      ...(relaxationAudit ? { negative_constraints_relaxation: relaxationAudit } : {}),
     }
 
     // Check secrets across BOTH metadata and body (Read/Write Trust Boundary)
@@ -2318,6 +2336,7 @@ export class ProjectMemory {
         workspace_fingerprint: metadata.workspace_fingerprint,
         created_at: nowIso,
         file: ctxFile,
+        ...(relaxationAudit ? { negative_constraints_relaxation: relaxationAudit } : {}),
       }
       const receiptFile = flushReceiptPath(this.cwd, checkpointId)
       writeFileAtomic(receiptFile, JSON.stringify(receipt, null, 2))
@@ -2379,7 +2398,9 @@ export class ProjectMemory {
       cpMeta.source_session_id !== receipt.source_session_id ||
       (cpMeta.git_head ?? null) !== (receipt.git_head ?? null) ||
       (cpMeta.git_branch ?? null) !== (receipt.git_branch ?? null) ||
-      (cpMeta.workspace_fingerprint ?? null) !== (receipt.workspace_fingerprint ?? null)
+      (cpMeta.workspace_fingerprint ?? null) !== (receipt.workspace_fingerprint ?? null) ||
+      JSON.stringify(cpMeta.negative_constraints_relaxation ?? null) !==
+        JSON.stringify(receipt.negative_constraints_relaxation ?? null)
     ) {
       return null // Tampered receipt or mismatched checkpoint metadata!
     }

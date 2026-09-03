@@ -447,6 +447,15 @@ export const PROJECT_CONTEXT_FILENAME = 'PROJECT_CONTEXT.md'
 export const PROJECT_CONTEXT_MAX_BYTES = 5120 // 5KB hard limit
 export const CHECKPOINT_ID_RE = /^CP-\d{4,}$/
 
+export interface NegativeConstraintsRelaxationAudit {
+  checkpoint_id: string
+  timestamp: string
+  actor: string
+  previous_context_sha256: string
+  reason: string
+  removed_constraints: string[]
+}
+
 export interface ProjectContextMetadata {
   schema_version: number
   project_id: string
@@ -461,6 +470,8 @@ export interface ProjectContextMetadata {
   workspace_fingerprint?: string
   base_context_sha256: string
   generated_at: string
+  /** Structured audit trail recorded whenever substantive negative constraints are relaxed (§3.4). */
+  negative_constraints_relaxation?: NegativeConstraintsRelaxationAudit
 }
 
 export interface ProjectContext {
@@ -483,6 +494,13 @@ export interface FlushReceipt {
   workspace_fingerprint?: string
   created_at: string
   file: string
+  /** Structured audit trail recorded whenever substantive negative constraints are relaxed (§3.4). */
+  negative_constraints_relaxation?: NegativeConstraintsRelaxationAudit
+}
+
+export interface NegativeConstraintsRelaxationInput {
+  reason: string
+  approved_by?: string
 }
 
 export interface FlushInput {
@@ -494,8 +512,10 @@ export interface FlushInput {
   git_head?: string
   workspace_fingerprint?: string
   /**
-   * Explicit, auditable reason required when deleting or relaxing existing substantive negative constraints.
-   * Without this, all previous substantive negative constraints must be preserved (§3.3).
+   * Explicit, auditable authorization required when deleting or relaxing existing substantive negative constraints.
+   * Without this, all previous substantive negative constraints must be preserved (§3.4).
    */
+  relax_negative_constraints?: NegativeConstraintsRelaxationInput | string
+  /** Backwards compatibility alias for relax_negative_constraints */
   relax_negative_constraints_reason?: string
 }

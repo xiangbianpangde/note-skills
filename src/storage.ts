@@ -775,6 +775,7 @@ export function validateProjectContext(
     'workspace_fingerprint',
     'base_context_sha256',
     'generated_at',
+    'negative_constraints_relaxation',
   ])
   for (const key of Object.keys(m)) {
     if (!ALLOWED_METADATA_KEYS.has(key)) {
@@ -783,6 +784,22 @@ export function validateProjectContext(
         `PROJECT_CONTEXT frontmatter contains unauthorized field "${key}"`,
         { field: key },
       )
+    }
+  }
+
+  if (m.negative_constraints_relaxation !== undefined) {
+    if (typeof m.negative_constraints_relaxation !== 'object' || m.negative_constraints_relaxation === null) {
+      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation must be an object')
+    }
+    const r = m.negative_constraints_relaxation as unknown as Record<string, unknown>
+    if (typeof r.checkpoint_id !== 'string' || !CHECKPOINT_ID_RE.test(r.checkpoint_id)) {
+      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation.checkpoint_id is invalid')
+    }
+    if (typeof r.reason !== 'string' || r.reason.trim().length === 0) {
+      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation.reason is invalid')
+    }
+    if (!Array.isArray(r.removed_constraints)) {
+      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation.removed_constraints must be an array')
     }
   }
 
@@ -813,6 +830,8 @@ export function normalizeConstraint(text: string): string {
   return text
     .toLowerCase()
     .replace(/^[-*•\d.\s]+/, '')
+    .replace(/^~~|~~$/g, '')
+    .replace(/[`*_~]/g, '')
     .replace(/[.!?;:。！？；：\s]+$/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -822,13 +841,81 @@ export function extractSubstantiveConstraints(body: string): string[] {
   const match = body.match(
     /##\s*(?:negative\s*constraints|do\s*not\s*assume)(?:\s*[/|]\s*(?:negative\s*constraints|do\s*not\s*assume))?\s*\n+([\s\S]*?)(?=\n+##|$)/i,
   )
-  const content = match?.[1]?.trim()
-  if (!content) return []
-  const lines = content
+  const rawContent = match?.[1]
+  if (!rawContent) return []
+
+  // 1. Strip HTML comments so commented-out constraints are never treated as active
+  const uncommented = rawContent.replace(/<!--[\s\S]*?-->/g, '')
+
+  const lines = uncommented
     .split('\n')
-    .map((l) => l.replace(/^[-*•\d.\s]+/, '').trim())
+    .map((l) => l.trim())
     .filter(Boolean)
-  return lines.filter((line) => line.length >= 3 && !ABSENCE_OF_CONSTRAINTS_PATTERN.test(line))
+
+  const inactiveMarkerPattern =
+    /^(?:(?:this\s+constraint\s+is\s+)?(?:no\s+longer\s+active|inactive|historical|removed|deprecated|obsolete|disabled|ignored?|cancelled?|void)(?:\s*[:：\-])?|ignore(?:\s+the\s+following)?(?:\s+old)?\s+(?:rule|constraint)[:：]?|【已废弃】|【已删除】|【已作废】|已废弃|已删除|已作废)/i
+
+  const results: string[] = []
+  for (const rawLine of lines) {
+    const strippedBullet = rawLine.replace(/^[-*•\d.\s]+/, '').trim()
+    // 2. Ignore strikethrough lines: e.g. ~~Do not deploy~~
+    if (/^~~[\s\S]*~~$/.test(strippedBullet)) {
+      continue
+    }
+
+    // 3. Ignore lines explicitly marked as inactive / historical / removed
+    if (inactiveMarkerPattern.test(strippedBullet)) {
+      continue
+    }
+
+    // 4. Ignore lines matching absence-of-constraints declarations (e.g. "none", "n/a", etc.)
+    if (ABSENCE_OF_CONSTRAINTS_PATTERN.test(strippedBullet)) {
+      continue
+    }
+
+    if (strippedBullet.length >= 3) {
+      results.push(strippedBullet)
+    }
+  }
+
+  return results
+}
+
+export function extractSubstantiveConstraintSet(body: string): Set<string> {
+  const list = extractSubstantiveConstraints(body)
+  return new Set(list.map(normalizeConstraint).filter(Boolean))
+}
+
+export function isSubstantiveRelaxationReason(reason: string): boolean {
+  const trimmed = reason.trim()
+  if (trimmed.length < 15) return false
+
+  if (/[\u4e00-\u9fa5]/.test(trimmed)) {
+    if (trimmed.length < 10) return false
+    const uniqueChars = new Set([...trimmed.replace(/[^\u4e00-\u9fa5]/g, '')])
+    if (uniqueChars.size < 5) return false
+    if (/^(?:测试|占位|暂无|无理由|跳过|忽略)+$/i.test(trimmed)) return false
+    return true
+  }
+
+  const tokens = trimmed.split(/\s+/)
+  if (tokens.length < 3) return false
+
+  const uniqueTokens = new Set(tokens.map((t) => t.toLowerCase()))
+  if (uniqueTokens.size <= 1) return false
+
+  const placeholderTokens = new Set([
+    'none', 'n/a', 'na', 'nil', 'null', 'tbd', 'todo', 'test', 'testing',
+    'placeholder', 'dummy', 'not', 'valid', 'reason', 'reasons', 'no',
+    'just', 'because', 'bypass', 'skip', 'relax', 'delete', 'remove',
+    'clear', 'at', 'all', 'any', 'some', 'thing', 'text', 'sample', 'foo', 'bar'
+  ])
+
+  const nonPlaceholderCount = tokens.filter(
+    (t) => !placeholderTokens.has(t.toLowerCase().replace(/[^a-z0-9]/g, ''))
+  ).length
+
+  return nonPlaceholderCount >= 2
 }
 
 export function containsSubstantiveConstraint(text: string): boolean {
