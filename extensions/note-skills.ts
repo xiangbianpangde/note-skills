@@ -1150,46 +1150,33 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
       return; // Mode B
     }
 
-    // INV-COMPACT-01 check (§P1-4 Sol review):
-    // If the entry immediately following coveredIndex is a toolResult (meaning coveredId
-    // was an assistant tool call whose toolResult was NOT checkpointed), we cannot cut
-    // without evicting an uncheckpointed toolResult! Mode A is strictly FORBIDDEN -> Mode B!
-    if (coveredIndex < branchEntries.length - 1) {
-      const immediateNext = branchEntries[coveredIndex + 1] as { message?: { role?: string }; type?: string; id?: string };
-      if (immediateNext?.message?.role === "toolResult") {
+    // Strict INV-COMPACT-01 Retention Frontier (§P1-4 Sol review):
+    // To guarantee zero uncheckpointed entries are evicted, the cut point
+    // MUST be strictly at coveredIndex + 1 (or keeping coveredId if at the very end).
+    // Jumping forward over intermediate entries (custom, toolResult, etc.) to find
+    // a later cut point would evict those intermediate uncheckpointed entries!
+    let firstKeptEntryId: string;
+    if (coveredIndex === branchEntries.length - 1) {
+      firstKeptEntryId = coveredId;
+    } else {
+      const immediateNext = branchEntries[coveredIndex + 1] as {
+        message?: { role?: string };
+        type?: string;
+        id?: string;
+      };
+      if (!immediateNext?.id || immediateNext.type === "compaction" || immediateNext.message?.role === "toolResult") {
         pi.appendEntry("note-skills-compaction", {
           mode: "emergency_safe",
           reason: event?.reason ?? "manual",
-          cause: "uncheckpointed_tool_result_after_covered_entry",
+          cause:
+            immediateNext?.message?.role === "toolResult"
+              ? "uncheckpointed_tool_result_after_covered_entry"
+              : "uncheckpointed_or_illegal_frontier_entry",
           at: new Date().toISOString(),
         });
-        return; // Mode B
+        return; // Mode B!
       }
-    }
-
-    // Compute aggressive cut boundary (Retention Frontier):
-    // Cut directly after coveredIndex at the first valid cut point
-    let firstKeptEntryId: string | undefined;
-    for (let i = coveredIndex + 1; i < branchEntries.length; i++) {
-      const entry = branchEntries[i] as { message?: { role?: string }; type?: string; id?: string };
-      if (entry?.id && entry.type !== "compaction" && entry.message?.role && entry.message.role !== "toolResult") {
-        firstKeptEntryId = entry.id;
-        break;
-      }
-    }
-
-    if (!firstKeptEntryId) {
-      if (coveredIndex === branchEntries.length - 1) {
-        firstKeptEntryId = coveredId;
-      } else {
-        pi.appendEntry("note-skills-compaction", {
-          mode: "emergency_safe",
-          reason: event?.reason ?? "manual",
-          cause: "no_legal_cut_boundary_after_covered_entry",
-          at: new Date().toISOString(),
-        });
-        return; // Mode B
-      }
+      firstKeptEntryId = immediateNext.id;
     }
 
     const nextActionMatch = currentContext.body.match(/##\s*next\s*action\s*\n+([^\n]+)/i);
@@ -1207,14 +1194,12 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
       `Checkpoint: ${currentContext.metadata.checkpoint_id} (revision ${currentContext.metadata.context_revision})`,
     ].join("\n");
 
-    const resolvedFirstKeptId = firstKeptEntryId ?? event?.preparation?.firstKeptEntryId ?? coveredId ?? "entry-first";
-
     pi.appendEntry("note-skills-compaction", {
       mode: "verified_pointer",
       checkpoint_id: currentContext.metadata.checkpoint_id,
       context_revision: currentContext.metadata.context_revision,
       covered_through_entry_id: coveredId,
-      first_kept_entry_id: resolvedFirstKeptId,
+      first_kept_entry_id: firstKeptEntryId,
       reason: event?.reason ?? "manual",
       at: new Date().toISOString(),
     });
@@ -1222,7 +1207,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
     return {
       compaction: {
         summary: pointerSummary,
-        firstKeptEntryId: resolvedFirstKeptId,
+        firstKeptEntryId: firstKeptEntryId,
         tokensBefore: event?.preparation?.tokensBefore ?? 0,
       },
     };

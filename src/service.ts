@@ -2308,9 +2308,7 @@ export class ProjectMemory {
     const ctx = readProjectContext(this.cwd)
     if (!ctx) return null
     const cfg = readConfig(this.cwd)
-    // Re-validate size budget, schema, authority, required sections on read boundary
-    validateProjectContext(ctx, cfg.project_id)
-    // Re-scan secrets on read boundary across BOTH metadata and body
+    // 1. Re-scan secrets on read boundary across BOTH metadata and body first
     const secretHits = findSecretMatches(
       { metadata: ctx.metadata as unknown as Record<string, unknown>, body: ctx.body },
       secretRulesFor(cfg),
@@ -2323,6 +2321,8 @@ export class ProjectMemory {
         { matched: secretHits.map((hit) => `${hit.rule}@${hit.path}`) },
       )
     }
+    // 2. Re-validate size budget, schema, authority, required sections on read boundary
+    validateProjectContext(ctx, cfg.project_id)
     return ctx
   }
 
@@ -2373,7 +2373,7 @@ export class ProjectMemory {
     for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
       if (status !== 'complete' && status !== 'done') {
         const re = new RegExp(
-          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|achieved|verified|已完成|完成|实现)`,
+          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|shipped|signed\\s+off|passed|acceptance\\s+criteria|achieved|verified|已完成|完成|实现|验收通过|闭环)`,
           'i',
         )
         if (re.test(context.body)) {
@@ -2394,7 +2394,7 @@ export class ProjectMemory {
     for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
       if (status !== 'complete' && status !== 'done') {
         const re = new RegExp(
-          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|achieved|verified|已完成|完成|实现)`,
+          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|shipped|signed\\s+off|passed|acceptance\\s+criteria|achieved|verified|已完成|完成|实现|验收通过|闭环)`,
           'i',
         )
         if (re.test(body)) {

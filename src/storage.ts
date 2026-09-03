@@ -728,7 +728,7 @@ export function validateProjectContext(
       { authority: m.authority },
     )
   }
-  if (typeof m.context_revision !== 'number' || m.context_revision < 1) {
+  if (!Number.isInteger(m.context_revision) || m.context_revision < 1) {
     throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT context_revision must be a positive integer')
   }
   if (!CHECKPOINT_ID_RE.test(m.checkpoint_id)) {
@@ -740,20 +740,50 @@ export function validateProjectContext(
   if (typeof m.source_session_id !== 'string' || m.source_session_id.trim() === '') {
     throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT source_session_id must be a non-empty string')
   }
-  if (typeof m.base_context_sha256 !== 'string') {
-    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT base_context_sha256 must be a string')
+  const SHA256_OPT_RE = /^(?:|[0-9a-f]{64})$/
+  if (typeof m.base_context_sha256 !== 'string' || !SHA256_OPT_RE.test(m.base_context_sha256)) {
+    throw new ProjectMemoryError(
+      'INVALID_INPUT',
+      'PROJECT_CONTEXT base_context_sha256 must be empty or 64 hex characters',
+    )
   }
-  if (typeof m.generated_at !== 'string' || isNaN(Date.parse(m.generated_at))) {
-    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT generated_at must be valid ISO timestamp')
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+  if (typeof m.generated_at !== 'string' || !ISO_RE.test(m.generated_at)) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT generated_at must be valid ISO-8601 timestamp')
   }
-  if (m.git_branch !== undefined && typeof m.git_branch !== 'string') {
-    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT git_branch must be a string')
+  if (m.git_branch !== undefined && (typeof m.git_branch !== 'string' || !/^[a-zA-Z0-9_\-./]+$/.test(m.git_branch))) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT git_branch must be valid branch name string')
   }
-  if (m.git_head !== undefined && typeof m.git_head !== 'string') {
-    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT git_head must be a string')
+  if (m.git_head !== undefined && (typeof m.git_head !== 'string' || !/^[0-9a-f]{7,64}$/i.test(m.git_head))) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT git_head must be a valid git commit hash (7 to 64 hex characters)')
   }
   if (m.workspace_fingerprint !== undefined && typeof m.workspace_fingerprint !== 'string') {
     throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT workspace_fingerprint must be a string')
+  }
+
+  // Schema allowlist: reject any unexpected metadata fields
+  const ALLOWED_METADATA_KEYS = new Set([
+    'schema_version',
+    'project_id',
+    'authority',
+    'context_revision',
+    'checkpoint_id',
+    'source_session_id',
+    'covered_through_entry_id',
+    'git_branch',
+    'git_head',
+    'workspace_fingerprint',
+    'base_context_sha256',
+    'generated_at',
+  ])
+  for (const key of Object.keys(m)) {
+    if (!ALLOWED_METADATA_KEYS.has(key)) {
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        `PROJECT_CONTEXT frontmatter contains unauthorized field "${key}"`,
+        { field: key },
+      )
+    }
   }
 
   // Validate required sections in body (§3.3 Anti-Mini-Wiki Rules)
@@ -776,15 +806,18 @@ export function validateProjectContext(
   }
 }
 
-function isTrivialNegativeConstraint(text: string): boolean {
+export function containsSubstantiveConstraint(text: string): boolean {
   const lines = text
     .split('\n')
-    .map((l) => l.trim())
+    .map((l) => l.replace(/^[-*•\d.\s]+/, '').trim())
     .filter(Boolean)
-  if (lines.length === 0) return true
-  // Case-insensitive check: none specified, none, n/a, 无, 暂无, etc.
-  const placeholderRe = /^[-*•\d.]*\s*(?:none(?:\s+specified)?|n\/a|nil|empty|无|暂无|未指定|无约束)[\s.]*$/i
-  return lines.every((line) => placeholderRe.test(line))
+  if (lines.length === 0) return false
+  // Check if every line is merely stating absence of constraints:
+  // e.g. "none specified", "no constraints", "none", "not specified", "none currently", "n/a", "暂无", "无特别约束", "暂无约束"
+  const nonConstraintPattern =
+    /^(?:none(?:\s+\w+)?|no\s+\w+|not\s+\w+|n\/?a|nil|empty|null|无|暂无|没有|未指定|无约束|无特别|不适用|尚无)[\s\w.]*$/i
+  const substantive = lines.filter((line) => !nonConstraintPattern.test(line) && line.length >= 3)
+  return substantive.length > 0
 }
 
 export function extractNegativeConstraints(body: string): string | undefined {
@@ -793,7 +826,7 @@ export function extractNegativeConstraints(body: string): string | undefined {
   )
   const content = match?.[1]?.trim()
   if (!content) return undefined
-  if (isTrivialNegativeConstraint(content)) return undefined
+  if (!containsSubstantiveConstraint(content)) return undefined
   return content
 }
 
@@ -802,6 +835,7 @@ export function tryReadGitIdentity(cwd: string): { branch?: string; head?: strin
     const gitDir = path.join(cwd, '.git')
     if (!fs.existsSync(gitDir)) return {}
     let headPath = path.join(gitDir, 'HEAD')
+    let commonGitDir = gitDir
     const st = fs.statSync(gitDir)
     if (!st.isDirectory()) {
       const gitFileContent = fs.readFileSync(gitDir, 'utf8').trim()
@@ -809,6 +843,13 @@ export function tryReadGitIdentity(cwd: string): { branch?: string; head?: strin
       if (match && match[1]) {
         const resolvedGitDir = path.resolve(cwd, match[1])
         headPath = path.join(resolvedGitDir, 'HEAD')
+        commonGitDir = resolvedGitDir
+        // In linked git worktree, commondir points to the main repository .git
+        const commonFile = path.join(resolvedGitDir, 'commondir')
+        if (fs.existsSync(commonFile)) {
+          const commonRel = fs.readFileSync(commonFile, 'utf8').trim()
+          commonGitDir = path.resolve(resolvedGitDir, commonRel)
+        }
       }
     }
     if (!fs.existsSync(headPath)) return {}
@@ -817,9 +858,30 @@ export function tryReadGitIdentity(cwd: string): { branch?: string; head?: strin
     if (branchMatch && branchMatch[1]) {
       const branch = branchMatch[1]
       let head: string | undefined
-      const branchRefFile = path.join(path.dirname(headPath), 'refs', 'heads', branch)
-      if (fs.existsSync(branchRefFile)) {
-        head = fs.readFileSync(branchRefFile, 'utf8').trim()
+      // Try resolving head from worktree-local refs, common refs, or packed-refs
+      const candidateRefFiles = [
+        path.join(path.dirname(headPath), 'refs', 'heads', branch),
+        path.join(commonGitDir, 'refs', 'heads', branch),
+      ]
+      for (const rf of candidateRefFiles) {
+        if (fs.existsSync(rf)) {
+          head = fs.readFileSync(rf, 'utf8').trim()
+          break
+        }
+      }
+      if (!head) {
+        const packedFiles = [path.join(commonGitDir, 'packed-refs'), path.join(path.dirname(headPath), 'packed-refs')]
+        for (const pf of packedFiles) {
+          if (fs.existsSync(pf)) {
+            const packedContent = fs.readFileSync(pf, 'utf8')
+            const escaped = branch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            const match = new RegExp(`^([0-9a-f]{40})\\s+refs/heads/${escaped}$`, 'm').exec(packedContent)
+            if (match && match[1]) {
+              head = match[1]
+              break
+            }
+          }
+        }
       }
       return { branch, head }
     } else if (/^[0-9a-f]{40}$/i.test(headContent)) {
