@@ -62,6 +62,68 @@ test("receipt-shaped echo text is not re-captured (echo amplification regression
   assert.equal(candidates.length, 0, `receipt echo must not produce candidates (got ${candidates.length})`);
 });
 
+test("gate follow-up run is suppressed entirely (planning/inspection loop regression)", () => {
+  // Field report: during a gate follow-up run, the assistant's planning text
+  // ("先处理本轮 6 条候选，逐条区分新的持久风险与已被 PM-RSK-0008 覆盖的审核回声。")
+  // contained "风险" and generated a fresh candidate (cand_b2f5c71c...) — which
+  // immediately fired ANOTHER gate follow-up, trapping the user in an infinite
+  // loop where they had to repeatedly abort to type anything.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-gate-run-suppress-"));
+  new ProjectMemory(cwd).init({ project_id: "gate-run-suppress" });
+  const { events } = extensionHarness();
+  const ctx = {
+    cwd,
+    hasUI: false,
+    ui: { setStatus() {}, notify() {} },
+    sessionManager: { getSessionId: () => "session-grs", getLeafId: () => "leaf-grs" },
+  };
+
+  // Case 1: Low-level run contains the gate message (the follow-up turn in Pi).
+  // Entire run must be suppressed; zero candidates persisted.
+  events.get("agent_end")!(
+    {
+      messages: [
+        {
+          role: "custom",
+          customType: "note-skills-capture-gate",
+          content: "[Note Skills Mandatory Capture Gate]\nThe finished discussion contains durable-memory candidates...",
+        },
+        {
+          role: "assistant",
+          content: "Planning audit candidate inspection\n先处理本轮 6 条候选，逐条区分新的持久风险与已被 PM-RSK-0008 覆盖的审核回声。",
+        },
+        {
+          role: "assistant",
+          content: "本轮 6 条候选已全部处理：\n- 已捕获 PM-DEF-0014：修复 P1/P2 后重新签字\n- 已跳过 4 条过程/重复风险回声\n- 已记录的风险：PM-RSK-0008",
+        },
+      ],
+    },
+    ctx,
+  );
+  const candidates1 = new ProjectMemory(cwd).pendingCaptureCandidates();
+  assert.equal(candidates1.length, 0, `gate follow-up run must produce 0 candidates (got ${candidates1.length})`);
+
+  // Case 2: Even if customType is omitted, an assistant message planning gate handling
+  // or citing note IDs (PM-RSK-0008, PM-DEF-0014) is filtered by isGateMetaDiscourse.
+  const cwd2 = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-meta-discourse-"));
+  new ProjectMemory(cwd2).init({ project_id: "meta-discourse" });
+  const harness2 = extensionHarness();
+  const ctx2 = { ...ctx, cwd: cwd2 };
+  harness2.events.get("agent_end")!(
+    {
+      messages: [
+        {
+          role: "assistant",
+          content: "先处理本轮 6 条候选，逐条区分新的持久风险与已被 PM-RSK-0008 覆盖的审核回声。",
+        },
+      ],
+    },
+    ctx2,
+  );
+  const candidates2 = new ProjectMemory(cwd2).pendingCaptureCandidates();
+  assert.equal(candidates2.length, 0, `meta-discourse planning must produce 0 candidates (got ${candidates2.length})`);
+});
+
 test("same content re-scanned across agent_end rounds is NOT re-emitted (content dedup)", () => {
   // Field report (researchctl): the same excerpt persisted up to ~9 times —
   // candidate_id is derived from spanKey (blockIndex), so a later agent_end

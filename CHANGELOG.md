@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.5 - 2026-09-02
+
+- **Completely eliminate gate follow-up loop trapping the user**:
+  - `agent_end` now checks if the low-level run was dispatched to handle the
+    gate (`customType: "note-skills-capture-gate"` present in `event.messages`).
+    Gate follow-up runs are dedicated to candidate resolution; any assistant
+    text, thinking, planning, or tool invocations in that run are gate-handling
+    processing and are suppressed entirely from capture scanning. This stops the
+    infinite automated follow-up loop (`triggerTurn: true` -> assistant ->
+    `agent_end` -> followUp -> assistant -> ...) where users were forced to
+    repeatedly click abort/pause to send messages.
+  - Enhanced `isGateMetaDiscourse` for assistant messages in all runs: suppresses
+    any discourse mentioning existing Note IDs (`PM-DEF-xxxx`, `PM-RSK-xxxx`),
+    tool names (`note_skills`), gate planning phrases ("先处理本轮...条候选",
+    "区分...风险与...回声", "Planning audit candidate", "Inspecting gate candidate",
+    "纯过程旁白"), and acknowledgment summaries.
+- Regression tests: gate follow-up run produces zero candidates + meta-discourse
+  planning suppressed (72 → 73).
+
 ## 0.4.4 - 2026-09-02
 
 - **Retrieval injection is now opt-in (first-use gate)**: before_agent_start

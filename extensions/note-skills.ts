@@ -429,28 +429,36 @@ function messageBlocks(messages: unknown[]): MessageBlock[] {
  * even inside an assistant gate-handling reply, because suppression only
  * triggers when the block is dominated by meta-discourse.
  */
-function isGateMetaDiscourse(content: string): boolean {
-  const trimmed = content.trim();
+function isGateMetaDiscourse(block: MessageBlock): boolean {
+  const trimmed = block.content.trim();
   if (!trimmed) return true;
   // 1) The gate announcement itself.
-  if (trimmed.startsWith("[Note Skills Mandatory Capture Gate]")) return true;
-  // 1b) Receipt-shaped text: a detailed capture/acknowledge receipt quoting
-  // candidate ids (cand_<32hex>), skip reasons, type lists. The model writes
-  // these to satisfy the gate; re-scanning them (echo amplification loop,
-  // PM-DEF-0009) produced up to 8 candidates from the SAME receipt text across
-  // different type rules. Any block containing candidate-id hashes is a
-  // receipt/echo, not a new durable unit — even when long.
+  if (trimmed.includes("[Note Skills Mandatory Capture Gate]")) return true;
+  // 2) Quoting candidate IDs.
   if (/cand_[0-9a-f]{32}/i.test(trimmed)) return true;
-  // 1c) Gate vocabulary density without length cap: a block dominated by
-  // gate/receipt words is meta even when it exceeds the short-block rule.
+
+  // 3) Assistant meta-discourse about gate handling:
+  if (block.role === "assistant") {
+    // Mentions existing note IDs (e.g. PM-RSK-0008, PM-DEF-0014)
+    if (/\bPM-(?:DEF|DEC|OPN|ASM|RSK|IDE)-\d{4}\b/i.test(trimmed)) return true;
+    // Mentions note_skills or project_memory
+    if (/\b(?:note_skills|project_memory|\/note-skills)\b/i.test(trimmed)) return true;
+    // Planning / inspection / gate management phrases
+    if (/(?:处理|本轮|检查|确认|跳过|捕获|区分|记录)\s*(?:[0-9一二三四五六七八九十]+\s*条)?\s*候选/i.test(trimmed)) return true;
+    if (/(?:候选\s*已\s*(?:处理|解决|清理|acknowledge|跳过|捕获))/i.test(trimmed)) return true;
+    if (/(?:审核回声|过程旁白|回声放大|待决项|清零|skip_reason|skip理由|mandatory-capture)/i.test(trimmed)) return true;
+    if (/(?:planning audit candidate|inspecting gate candidate|grouping acknowledgments|finalizing receipt response)/i.test(trimmed)) return true;
+    if (/已\s*acknowledge|本轮候选已处理|本轮\s*\d+\s*条候选已全部处理/i.test(trimmed)) return true;
+  }
+
+  // 4) Dense gate vocabulary in any message
   const dense = (trimmed.match(
-    /已\s*acknowledge|待决项|候选|捕获|清理|settled|skip(?:ped)?\s*[:：]?|receipt|门禁|清零|candidate|acknowledge|semantic gate|pending capture|待解决/g,
+    /已\s*acknowledge|待决项|候选|捕获|清理|settled|skip(?:ped)?\s*[:：]?|receipt|门禁|清零|candidate|acknowledge|semantic gate|pending capture|待解决/gi,
   ) ?? []).length;
-  const candidateLines = (trimmed.match(/cand_[0-9a-f]{32}/gi) ?? []).length;
   const words = trimmed.split(/\s+/).length;
-  if (candidateLines >= 2 || (words <= 40 && dense >= 2)) return true;
-  // 2) Pure bookkeeping shapes like "已 acknowledge（skipped @...）待决项清零"
-  if (/^[^\n]*已\s*acknowledge/.test(trimmed) && /待决项|候选/.test(trimmed)) return true;
+  if (dense >= 2 || (words <= 40 && dense >= 1)) return true;
+  if (/^[^\n]*已\s*acknowledge/.test(trimmed)) return true;
+
   return false;
 }
 
@@ -476,7 +484,7 @@ function captureEligibleBlocks(blocks: MessageBlock[]): { index: number; block: 
   const out: { index: number; block: MessageBlock }[] = [];
   for (let index = 0; index < blocks.length; index++) {
     const block = blocks[index]!;
-    if (isGateMetaDiscourse(block.content)) continue;
+    if (isGateMetaDiscourse(block)) continue;
     out.push({ index, block });
   }
   return out;
@@ -776,11 +784,25 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
 
   pi.on("agent_end", (event, ctx) => {
     if (!hasConfig(ctx.cwd)) return;
-    const blocks = messageBlocks(event.messages);
-    // Gate-noise suppression (§cycle fix): exclude the gate message itself,
-    // assistant meta-discourse about handling the gate, and user messages that
-    // only quote gate vocabulary. This kills the same-source infinite loop
-    // where each acknowledge reply re-captured itself as new candidates.
+    const rawMessages = event.messages ?? [];
+
+    // CRITICAL: Suppress gate follow-up runs entirely (§cycle fix).
+    // When a gate is emitted with { deliverAs: "followUp", triggerTurn: true },
+    // Pi executes a run dedicated solely to resolving those candidates.
+    // Any outputs in that run (tool calls, thinking, planning, receipts) are
+    // gate-handling processing, NOT new user-discussed requirements.
+    // Scanning them causes an automated infinite turn loop (the model keeps
+    // answering the gate, triggering a new gate turn, locking out the user).
+    const isGateRun = rawMessages.some((m) => {
+      if (!m || typeof m !== "object") return false;
+      const rec = m as { role?: string; type?: string; customType?: string; content?: unknown };
+      if (rec.customType === "note-skills-capture-gate") return true;
+      if (typeof rec.content === "string" && rec.content.includes("[Note Skills Mandatory Capture Gate]")) return true;
+      return false;
+    });
+    if (isGateRun) return;
+
+    const blocks = messageBlocks(rawMessages);
     const eligible = captureEligibleBlocks(blocks);
     const sourceText = blocks.map((block) => block.content).join("\n");
     if (eligible.length === 0) return;

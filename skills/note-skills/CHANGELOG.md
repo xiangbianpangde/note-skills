@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5 - 2026-09-02
+
+- Fix gate follow-up loop: runs triggered by `note-skills-capture-gate` are suppressed entirely from candidate scanning; assistant discourse planning or citing Note IDs (`PM-xxx`) is excluded. Regression test (72→73).
+
 ## 0.4.4 - 2026-09-02
 
 - Retrieval injection opt-in: `retrieval_gate` config (first_ask default / enabled / disabled) + `/note-skills [on|off|status]` human command. First matching retrieval shows a decision prompt instead of silently injecting (field report: context pollution on broad queries). Regression tests (71→72).
