@@ -2,7 +2,7 @@
 
 ## 0.5.0 - 2026-09-03
 
-- **v0.5.0 Major Architecture Pivot (P0-A, P0-B & P0-C)**: From long-term memory archive alone to a 2-Layer Working Memory & Context Offload system.
+- **v0.5.0 Major Architecture Pivot (P0-A, P0-B, P0-C & P0-D)**: From long-term memory archive alone to a 2-Layer Working Memory & Context Offload system.
   - **P0-A Contract & Peer Dependency**:
     - Peer dependency updated: `@earendil-works/pi-coding-agent >=0.84.4`.
     - Formally established Two-Dimensional Authority Model: `PROJECT_CONTEXT.md` carries `authority: working_projection` (non-authoritative state projection, canonical truth overrides).
@@ -16,7 +16,11 @@
     - Mode A (Verified Pointer Compaction): when a verified checkpoint exists and covers the discarded frontier, replaces bloated history with minimal <100 token pointer summary and aggressively cuts `firstKeptEntryId` directly after the checkpointed boundary.
     - Mode B (Emergency Safe Compaction): when uncheckpointed, missing context, or mid-run token overflow occurs, falls back to native structured compaction and logs `EMERGENCY_UNFLUSHED_COMPACTION` — strictly obeying invariant INV-COMPACT-01 (*Never evict uncheckpointed state*).
     - Lifecycle tracking: `session_compact` resets compaction block counter; `session_compact_failed` warns on unexpected failure.
-  - Regression tests: 73 -> 78 tests.
+  - **P0-D Fresh-Session Reconstruction & Context Independence Benchmark**:
+    - `before_agent_start`: automatically detects and injects `PROJECT_CONTEXT.md` wrapped in a non-authoritative security envelope (`authority: working_projection`) explicitly stating that canonical files override and no permissions are elevated.
+    - Git Branch Staleness Guard: compares checkpoint's `git_branch` with live repository branch; warns `CONTEXT_STALE` on mismatch to prevent cross-branch context contamination (§6.2).
+    - Context Independence Test: multi-process automated benchmark in `tests/scenario.test.ts` proving a fresh blank session with zero conversation history continues tasks seamlessly and preserves negative constraints.
+  - Regression tests: 73 -> 80 tests.
 
 ## 0.4.5 - 2026-09-02
 

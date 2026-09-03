@@ -2,7 +2,7 @@
 
 ## 0.5.0 - 2026-09-03
 
-- Major architecture pivot (P0-A, P0-B & P0-C): L1 External Working Context (`PROJECT_CONTEXT.md`) + Transactional Flush (`/note-skills-flush`) + Safe Aggressive Compaction (`/note-skills-flush-compact`). Mode A verified pointer compaction (<100 tokens) vs Mode B emergency safe compaction (INV-COMPACT-01). Tests: 73 -> 78.
+- Major architecture pivot (P0-A..P0-D): L1 External Working Context (`PROJECT_CONTEXT.md`) + Transactional Flush (`/note-skills-flush`) + Safe Aggressive Compaction (`/note-skills-flush-compact`) + Fresh-Session Reconstruction with Context Independence Benchmark. Tests: 73 -> 80.
 
 ## 0.4.5 - 2026-09-02
 

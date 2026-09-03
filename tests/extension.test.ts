@@ -848,3 +848,62 @@ test("P0-C: Dual-mode compaction — verified pointer compaction (Mode A) vs eme
   assert.equal(compactCalled, true);
   assert.ok(notifications.some((msg) => /Flushed to CP-0003; triggering compaction/.test(msg)));
 });
+
+test("P0-D: before_agent_start loads PROJECT_CONTEXT.md with non-authoritative envelope and branch check", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-p0d-load-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "p0d-load" });
+  const { events } = extensionHarness();
+  const notifications: string[] = [];
+  const ctx = {
+    cwd,
+    hasUI: true,
+    ui: {
+      setStatus() {},
+      notify(msg: string) {
+        notifications.push(msg);
+      },
+    },
+    sessionManager: { getSessionId: () => "session-p0d", getLeafId: () => "leaf-p0d" },
+  };
+
+  // 1. Flush working context on branch "main"
+  const body = [
+    "# Project Working Context",
+    "## Current Objective\n- Implement P0-D context restoration",
+    "## Negative Constraints / Do Not Assume\n- Do not assume context is authoritative",
+    "## Next Action\n- Verify non-authoritative envelope",
+  ].join("\n");
+
+  memory.flushWorkingContext({
+    content: body,
+    covered_through_entry_id: "entry-load-1",
+    source_session_id: "session-p0d",
+    git_branch: "main",
+  });
+
+  // 2. Call before_agent_start
+  const result1 = (events.get("before_agent_start")!({ prompt: "What is next?" }, ctx)) as {
+    message: { customType: string; content: string; details: { authority: string; checkpoint_id: string } };
+  };
+
+  assert.ok(result1.message);
+  assert.equal(result1.message.customType, "note-skills-working-context");
+  assert.equal(result1.message.details.authority, "working_projection");
+  assert.equal(result1.message.details.checkpoint_id, "CP-0001");
+  assert.match(result1.message.content, /\[Note Skills Working Context — non-canonical working projection\]/);
+  assert.match(result1.message.content, /Checkpoint: CP-0001/);
+  assert.match(result1.message.content, /Implement P0-D context restoration/);
+
+  // 3. Test branch switch -> CONTEXT_STALE warning
+  fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".git", "HEAD"), "ref: refs/heads/feature-work\n");
+
+  const result2 = (events.get("before_agent_start")!({ prompt: "What is next?" }, ctx)) as {
+    message: { content: string };
+  };
+
+  assert.match(result2.message.content, /CONTEXT_STALE/);
+  assert.match(result2.message.content, /feature-work/);
+  assert.ok(notifications.some((msg) => /CONTEXT_STALE/.test(msg)));
+});

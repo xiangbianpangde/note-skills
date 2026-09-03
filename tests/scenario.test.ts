@@ -121,3 +121,145 @@ process.stdout.write(JSON.stringify({
   assert.equal(d.backlink, true);
   assert.equal(d.errors, 0);
 });
+
+test("P0-D: Context Independence Test — completely fresh blank sessions continue tasks seamlessly from working context", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-context-independence-"));
+  fs.writeFileSync(path.join(cwd, "SPEC.md"), "# Canonical Auth Spec\n\nMust support revocation.\n");
+
+  // --- Session 1: Initial planning & first working-context flush ---
+  const s1 = await session(
+    cwd,
+    `
+const pm = new ProjectMemory(process.env.PM_CWD);
+pm.init({ project_id: 'cit-test' });
+
+const body = [
+  "# Project Working Context",
+  "",
+  "## Current Objective",
+  "- Implement token revocation engine",
+  "",
+  "## Canonical References",
+  "- SPEC: SPEC.md @ v1",
+  "",
+  "## Verified Working State",
+  "- Token signing and verification are complete",
+  "",
+  "## Negative Constraints / Do Not Assume",
+  "- Do not allow wildcard tokens",
+  "- P1 refresh tokens are NOT approved",
+  "",
+  "## Next Action",
+  "- Implement revokeToken(tokenId) in auth.ts",
+].join("\\n");
+
+const receipt = pm.flushWorkingContext({
+  content: body,
+  covered_through_entry_id: "entry-s1-final",
+  source_session_id: "session-1",
+  git_branch: "main",
+});
+
+process.stdout.write(JSON.stringify({
+  checkpoint_id: receipt.checkpoint_id,
+  status: receipt.status,
+  sha256: receipt.new_context_sha256,
+}));
+`,
+  );
+
+  assert.equal(s1.checkpoint_id, "CP-0001");
+  assert.equal(s1.status, "FLUSH_VERIFIED");
+
+  // --- Session 2: Fresh blank process (zero conversation history, zero shared memory) ---
+  const s2 = await session(
+    cwd,
+    `
+const pm = new ProjectMemory(process.env.PM_CWD);
+const ctx = pm.readWorkingContext();
+if (!ctx) throw new Error("Missing working context");
+
+// Verify that the fresh agent can answer all continuation questions from PROJECT_CONTEXT.md:
+const hasObjective = /Implement token revocation engine/.test(ctx.body);
+const hasNegativeConstraints = /Do not allow wildcard tokens/.test(ctx.body) && /P1 refresh tokens are NOT approved/.test(ctx.body);
+const nextActionMatch = ctx.body.match(/##\\s*Next Action\\s*\\n+-\\s*([^\\n]+)/i);
+const nextAction = nextActionMatch ? nextActionMatch[1].trim() : "";
+
+// Simulate executing the next action
+const fs = await import("node:fs");
+const path = await import("node:path");
+fs.writeFileSync(path.join(process.env.PM_CWD, "auth.ts"), "export function revokeToken(id: string) { return true; }\\n");
+
+// Advance working context to CP-0002
+const updatedBody = [
+  "# Project Working Context",
+  "",
+  "## Current Objective",
+  "- Implement token revocation engine",
+  "",
+  "## Canonical References",
+  "- SPEC: SPEC.md @ v1",
+  "",
+  "## Verified Working State",
+  "- Token signing and verification are complete",
+  "- revokeToken(tokenId) implemented in auth.ts",
+  "",
+  "## Negative Constraints / Do Not Assume",
+  "- Do not allow wildcard tokens",
+  "- P1 refresh tokens are NOT approved",
+  "",
+  "## Next Action",
+  "- Run integration tests and prepare PR",
+].join("\\n");
+
+const receipt2 = pm.flushWorkingContext({
+  content: updatedBody,
+  covered_through_entry_id: "entry-s2-final",
+  source_session_id: "session-2",
+  base_context_sha256: ctx.sha256,
+  git_branch: "main",
+});
+
+process.stdout.write(JSON.stringify({
+  checkpoint_id: ctx.metadata.checkpoint_id,
+  authority: ctx.metadata.authority,
+  hasObjective,
+  hasNegativeConstraints,
+  nextAction,
+  receipt2_checkpoint_id: receipt2.checkpoint_id,
+  receipt2_revision: 2,
+}));
+`,
+  );
+
+  assert.equal(s2.checkpoint_id, "CP-0001");
+  assert.equal(s2.authority, "working_projection");
+  assert.equal(s2.hasObjective, true);
+  assert.equal(s2.hasNegativeConstraints, true);
+  assert.equal(s2.nextAction, "Implement revokeToken(tokenId) in auth.ts");
+  assert.equal(s2.receipt2_checkpoint_id, "CP-0002");
+
+  // --- Session 3: Third fresh blank process ---
+  const s3 = await session(
+    cwd,
+    `
+const pm = new ProjectMemory(process.env.PM_CWD);
+const ctx = pm.readWorkingContext();
+const nextActionMatch = ctx?.body.match(/##\\s*Next Action\\s*\\n+-\\s*([^\\n]+)/i);
+const nextAction = nextActionMatch ? nextActionMatch[1].trim() : "";
+const verifiedStateMatch = /revokeToken\\(tokenId\\) implemented in auth.ts/.test(ctx?.body ?? "");
+
+process.stdout.write(JSON.stringify({
+  checkpoint_id: ctx?.metadata.checkpoint_id,
+  revision: ctx?.metadata.context_revision,
+  nextAction,
+  verifiedStateMatch,
+}));
+`,
+  );
+
+  assert.equal(s3.checkpoint_id, "CP-0002");
+  assert.equal(s3.revision, 2);
+  assert.equal(s3.nextAction, "Run integration tests and prepare PR");
+  assert.equal(s3.verifiedStateMatch, true);
+});
