@@ -261,8 +261,19 @@ test("extension registers one memory tool, lifecycle gates, and user commands", 
   const parameters = (tools[0] as unknown as { parameters: { properties?: Record<string, unknown> } }).parameters;
   assert.equal(parameters.properties?.approved, undefined);
   assert.ok(parameters.properties?.candidate_ids);
-  assert.deepEqual(new Set(commands), new Set(["note-skills-init", "note-skills-reconcile", "note-skills", "note-skills-flush"]));
-  for (const event of ["session_start", "before_agent_start", "agent_settled", "agent_end", "session_before_compact"]) {
+  assert.deepEqual(
+    new Set(commands),
+    new Set(["note-skills-init", "note-skills-reconcile", "note-skills", "note-skills-flush", "note-skills-flush-compact"]),
+  );
+  for (const event of [
+    "session_start",
+    "before_agent_start",
+    "agent_settled",
+    "agent_end",
+    "session_before_compact",
+    "session_compact",
+    "session_compact_failed",
+  ]) {
     assert.ok(events.has(event), `missing event ${event}`);
   }
 });
@@ -702,4 +713,138 @@ test("extension tool flush and read_context actions and /note-skills-flush comma
   // With args: flushes new revision
   await commandHandlers.get("note-skills-flush")!("Execute next integration test", ctx);
   assert.ok(notifications.some((msg) => /Flushed working context to CP-0002/.test(msg)));
+});
+
+test("P0-C: Dual-mode compaction — verified pointer compaction (Mode A) vs emergency safe fallback (Mode B)", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-p0c-compaction-"));
+  const memory = new ProjectMemory(cwd);
+  memory.init({ project_id: "p0c-compaction" });
+  const { tools, commandHandlers, events, entries } = extensionHarness();
+  let compactCalled = false;
+  const notifications: string[] = [];
+  const ctx = {
+    cwd,
+    hasUI: true,
+    ui: {
+      setStatus() {},
+      notify(msg: string) {
+        notifications.push(msg);
+      },
+    },
+    sessionManager: { getSessionId: () => "session-p0c", getLeafId: () => "leaf-p0c" },
+    compact(_opts: unknown) {
+      compactCalled = true;
+    },
+  };
+
+  // Case 1: Mode B — Emergency Safe Compaction when no working context exists
+  const uncheckpointedEvent = {
+    type: "session_before_compact",
+    reason: "threshold" as const,
+    willRetry: false,
+    signal: new AbortController().signal,
+    preparation: {
+      firstKeptEntryId: "entry-010",
+      messagesToSummarize: [],
+      turnPrefixMessages: [],
+      isSplitTurn: false,
+      tokensBefore: 25_000,
+      fileOps: {} as never,
+      settings: {} as never,
+    },
+    branchEntries: [
+      { id: "entry-001", type: "message", message: { role: "user" } },
+      { id: "entry-010", type: "message", message: { role: "assistant" } },
+    ],
+  };
+
+  const modeBResult = events.get("session_before_compact")!(uncheckpointedEvent, ctx);
+  // Must return undefined so Pi native structured compaction runs
+  assert.equal(modeBResult, undefined);
+  const emergencyEntry = entries.find(
+    (e) => (e as { data?: { mode?: string } }).data?.mode === "emergency_safe",
+  );
+  assert.ok(emergencyEntry, "must record emergency safe compaction entry");
+
+  // Case 2: Mode A — Verified Pointer Compaction when verified checkpoint exists
+  const flushBody = [
+    "# Project Working Context",
+    "## Current Objective\n- Implement P0-C dual-mode compaction",
+    "## Negative Constraints / Do Not Assume\n- Never evict uncheckpointed state",
+    "## Next Action\n- Run automated dual-mode compaction test",
+  ].join("\n");
+
+  const receipt = memory.flushWorkingContext({
+    content: flushBody,
+    covered_through_entry_id: "entry-005",
+    source_session_id: "session-p0c",
+  });
+  assert.equal(receipt.status, "FLUSH_VERIFIED");
+
+  const checkpointedEvent = {
+    type: "session_before_compact",
+    reason: "manual" as const,
+    willRetry: false,
+    signal: new AbortController().signal,
+    preparation: {
+      firstKeptEntryId: "entry-002", // Default Pi would keep from entry-002
+      messagesToSummarize: [],
+      turnPrefixMessages: [],
+      isSplitTurn: false,
+      tokensBefore: 30_000,
+      fileOps: {} as never,
+      settings: {} as never,
+    },
+    branchEntries: [
+      { id: "entry-001", type: "message", message: { role: "user" } },
+      { id: "entry-002", type: "message", message: { role: "assistant" } },
+      { id: "entry-003", type: "message", message: { role: "user" } },
+      { id: "entry-004", type: "message", message: { role: "assistant" } },
+      { id: "entry-005", type: "message", message: { role: "toolResult" } }, // covered boundary
+      { id: "entry-006", type: "message", message: { role: "user" } }, // first valid cut point after covered
+      { id: "entry-007", type: "message", message: { role: "assistant" } },
+    ],
+  };
+
+  const modeAResult = events.get("session_before_compact")!(checkpointedEvent, ctx) as {
+    compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number };
+  };
+
+  assert.ok(modeAResult?.compaction);
+  // Summary is minimal pointer summary (~100 tokens), contains checkpoint ID and next action
+  assert.match(modeAResult.compaction.summary, /Project working state was externalized at CP-0001/);
+  assert.match(modeAResult.compaction.summary, /Run automated dual-mode compaction test/);
+  assert.match(modeAResult.compaction.summary, /Read PROJECT_CONTEXT\.md/);
+  // firstKeptEntryId aggressively cut right after covered boundary (entry-005) at entry-006
+  assert.equal(modeAResult.compaction.firstKeptEntryId, "entry-006");
+
+  const verifiedEntry = entries.find(
+    (e) => (e as { data?: { mode?: string } }).data?.mode === "verified_pointer",
+  );
+  assert.ok(verifiedEntry, "must record verified pointer compaction entry");
+
+  // Case 3: Test note_skills tool action flush_compact & /note-skills-flush-compact command
+  compactCalled = false;
+  const toolResult = (await tools[0]!.execute(
+    "call-fc" as never,
+    {
+      action: "flush_compact",
+      content: flushBody,
+      covered_through_entry_id: "entry-007",
+    } as never,
+    new AbortController().signal as never,
+    undefined as never,
+    ctx as never,
+  )) as { details: { action: string; result: { checkpoint_id: string; compaction_triggered: boolean } } };
+
+  assert.equal(toolResult.details.action, "flush_compact");
+  assert.equal(toolResult.details.result.checkpoint_id, "CP-0002");
+  assert.equal(toolResult.details.result.compaction_triggered, true);
+  assert.equal(compactCalled, true);
+
+  // Case 4: Test /note-skills-flush-compact command
+  compactCalled = false;
+  await commandHandlers.get("note-skills-flush-compact")!("Execute P0-D", ctx);
+  assert.equal(compactCalled, true);
+  assert.ok(notifications.some((msg) => /Flushed to CP-0003; triggering compaction/.test(msg)));
 });

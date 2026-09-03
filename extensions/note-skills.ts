@@ -45,6 +45,7 @@ const Params = Type.Object({
     "reconcile",
     "acknowledge",
     "flush",
+    "flush_compact",
     "read_context",
   ] as const),
   project_id: Type.Optional(Type.String({ description: "Project ID for init" })),
@@ -727,6 +728,22 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           result = receipt;
           break;
         }
+        case "flush_compact": {
+          const content = requireString(params.content ?? params.body, "content");
+          const covered = params.covered_through_entry_id ?? ctx.sessionManager.getLeafId() ?? "entry-unknown";
+          const receipt = memory.flushWorkingContext({
+            content,
+            covered_through_entry_id: covered,
+            source_session_id: ctx.sessionManager.getSessionId(),
+            base_context_sha256: params.base_context_sha256,
+          });
+          pi.appendEntry("note-skills-flush-receipt", receipt);
+          ctx.compact({
+            customInstructions: `Checkpoint ${receipt.checkpoint_id}`,
+          });
+          result = { ...receipt, compaction_triggered: true };
+          break;
+        }
         case "read_context": {
           const context = memory.readWorkingContext();
           result = context ?? { message: "No PROJECT_CONTEXT.md exists yet" };
@@ -934,41 +951,143 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
     );
   });
 
-  pi.on("session_before_compact", (_event, ctx) => {
+  pi.on("session_before_compact", (event, ctx) => {
     if (!hasConfig(ctx.cwd)) return;
     const memory = new ProjectMemory(ctx.cwd);
     const pending = refreshPending(memory);
-    if (pending.length === 0) return;
-    if (compactionBlocks >= 1) {
-      const receipt = {
-        gate: "before-compact",
-        status: "failed-open-after-retry-limit",
-        reason: "named capture candidates remained unresolved after one blocking reminder",
-        candidates: pending.map((candidate) => ({
-          candidate_id: candidate.candidate_id,
-          type: candidate.type,
-          markers: candidate.markers,
-          source_ref: candidate.source_ref,
-          source_excerpt: candidate.source_excerpt,
-          source_excerpt_sha256: candidate.source_excerpt_sha256,
-        })),
+    if (pending.length > 0) {
+      if (compactionBlocks >= 1) {
+        const receipt = {
+          gate: "before-compact",
+          status: "failed-open-after-retry-limit",
+          reason: "named capture candidates remained unresolved after one blocking reminder",
+          candidates: pending.map((candidate) => ({
+            candidate_id: candidate.candidate_id,
+            type: candidate.type,
+            markers: candidate.markers,
+            source_ref: candidate.source_ref,
+            source_excerpt: candidate.source_excerpt,
+            source_excerpt_sha256: candidate.source_excerpt_sha256,
+          })),
+          at: new Date().toISOString(),
+        };
+        pi.appendEntry("note-skills-receipt", receipt);
+        if (ctx.hasUI)
+          ctx.ui.notify(
+            `Note Skills: compaction allowed; ${pending.length} recoverable candidate envelope(s) remain durable.`,
+            "warning",
+          );
+      } else {
+        compactionBlocks += 1;
+        if (ctx.hasUI)
+          ctx.ui.notify(
+            `Note Skills blocked compaction once: resolve candidate IDs ${pending.map((candidate) => candidate.candidate_id).join(", ")}.`,
+            "warning",
+          );
+        return { cancel: true };
+      }
+    }
+
+    // --- P0-C Dual-Mode Compaction Strategy (§5 of v0.5 Architecture Contract) ---
+    const currentContext = memory.readWorkingContext();
+    if (!currentContext) {
+      // Mode B: Emergency Safe Compaction — no working context checkpoint exists.
+      // Leave compaction to Pi native structured summarization; never use pointer.
+      pi.appendEntry("note-skills-compaction", {
+        mode: "emergency_safe",
+        reason: event?.reason ?? "manual",
+        cause: "no_working_context",
         at: new Date().toISOString(),
-      };
-      pi.appendEntry("note-skills-receipt", receipt);
-      if (ctx.hasUI)
-        ctx.ui.notify(
-          `Note Skills: compaction allowed; ${pending.length} recoverable candidate envelope(s) remain durable.`,
-          "warning",
-        );
+      });
       return;
     }
-    compactionBlocks += 1;
-    if (ctx.hasUI)
-      ctx.ui.notify(
-        `Note Skills blocked compaction once: resolve candidate IDs ${pending.map((candidate) => candidate.candidate_id).join(", ")}.`,
-        "warning",
-      );
-    return { cancel: true };
+
+    const verifiedReceipt = memory.verifyFlushReceipt(currentContext.metadata.checkpoint_id);
+    if (!verifiedReceipt || verifiedReceipt.status !== "FLUSH_VERIFIED") {
+      // Mode B: Emergency Safe Compaction — latest receipt missing or not verified.
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Compaction: checkpoint ${currentContext.metadata.checkpoint_id} not verified, falling back to safe compaction`,
+          "warning",
+        );
+      }
+      pi.appendEntry("note-skills-compaction", {
+        mode: "emergency_safe",
+        reason: event?.reason ?? "manual",
+        cause: "unverified_receipt",
+        at: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Mode A: Verified Pointer Compaction!
+    // INV-COMPACT-01: Checkpoint provably covers the discarded frontier.
+    const coveredId = verifiedReceipt.covered_through_entry_id;
+    const branchEntries = event?.branchEntries ?? [];
+    const coveredIndex = branchEntries.findIndex((e) => e?.id === coveredId);
+
+    // Compute aggressive cut boundary (Retention Frontier):
+    // Cut directly after coveredIndex at the first valid cut point
+    let firstKeptEntryId: string | undefined = event?.preparation?.firstKeptEntryId;
+    if (coveredIndex >= 0) {
+      for (let i = coveredIndex + 1; i < branchEntries.length; i++) {
+        const entry = branchEntries[i] as { message?: { role?: string }; type?: string; id?: string };
+        if (entry?.id && entry.type !== "compaction" && entry.message?.role && entry.message.role !== "toolResult") {
+          firstKeptEntryId = entry.id;
+          break;
+        }
+      }
+    }
+
+    const nextActionMatch = currentContext.body.match(/##\s*next\s*action\s*\n+([^\n]+)/i);
+    const nextAction = nextActionMatch ? nextActionMatch[1]!.trim() : "Next Action";
+
+    const pointerSummary = [
+      `Project working state was externalized at ${currentContext.metadata.checkpoint_id}.`,
+      "",
+      "Before continuing:",
+      "1. Read PROJECT_CONTEXT.md (it contains the current minimal working projection).",
+      "2. Treat canonical project files (SPEC, ADR, code) as higher authority on conflict.",
+      "3. Retrieve referenced memory notes only when needed.",
+      `4. Continue from '${nextAction}'.`,
+      "",
+      `Checkpoint: ${currentContext.metadata.checkpoint_id} (revision ${currentContext.metadata.context_revision})`,
+    ].join("\n");
+
+    const resolvedFirstKeptId = firstKeptEntryId ?? event?.preparation?.firstKeptEntryId ?? coveredId ?? "entry-first";
+
+    pi.appendEntry("note-skills-compaction", {
+      mode: "verified_pointer",
+      checkpoint_id: currentContext.metadata.checkpoint_id,
+      context_revision: currentContext.metadata.context_revision,
+      covered_through_entry_id: coveredId,
+      first_kept_entry_id: resolvedFirstKeptId,
+      reason: event?.reason ?? "manual",
+      at: new Date().toISOString(),
+    });
+
+    return {
+      compaction: {
+        summary: pointerSummary,
+        firstKeptEntryId: resolvedFirstKeptId,
+        tokensBefore: event?.preparation?.tokensBefore ?? 0,
+      },
+    };
+  });
+
+  pi.on("session_compact", (_event, ctx) => {
+    if (!hasConfig(ctx.cwd)) return;
+    compactionBlocks = 0; // reset compaction block counter on successful compaction
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("note-skills", "memory: compacted");
+    }
+  });
+
+  pi.on("session_compact_failed", (event, ctx) => {
+    if (!hasConfig(ctx.cwd)) return;
+    if (ctx.hasUI && !event.aborted) {
+      ctx.ui.notify(`Note Skills compaction failed: ${event.errorMessage ?? "unknown"}`, "warning");
+    }
   });
 
   pi.registerCommand("note-skills-init", {
@@ -1087,6 +1206,70 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
         } else {
           ctx.ui.notify("No PROJECT_CONTEXT.md exists. Usage: /note-skills-flush <objective / action>", "warning");
         }
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  /**
+   * /note-skills-flush-compact [objective] — flush working context then immediately trigger compaction.
+   */
+  pi.registerCommand("note-skills-flush-compact", {
+    description: "Flush working context to PROJECT_CONTEXT.md and trigger compaction immediately",
+    handler: async (args, ctx) => {
+      if (!hasConfig(ctx.cwd)) {
+        ctx.ui.notify("Note Skills is not initialized (run /note-skills-init first)", "warning");
+        return;
+      }
+      try {
+        const memory = new ProjectMemory(ctx.cwd);
+        const current = memory.readWorkingContext();
+        const leafId = ctx.sessionManager.getLeafId() ?? "entry-manual";
+        const objective =
+          args.trim() ||
+          current?.body.match(/##\s*current\s*objective\s*\n+([^\n]+)/i)?.[1]?.trim() ||
+          "Continue project work";
+        const nextAction = args.trim()
+          ? `Continue with: ${args.trim()}`
+          : current?.body.match(/##\s*next\s*action\s*\n+([^\n]+)/i)?.[1]?.trim() || "Execute next step";
+
+        const template = [
+          "# Project Working Context",
+          "",
+          "## Current Objective",
+          `- ${objective}`,
+          "",
+          "## Negative Constraints / Do Not Assume",
+          "- None specified",
+          "",
+          "## Next Action",
+          `- ${nextAction}`,
+        ].join("\n");
+
+        const receipt = memory.flushWorkingContext({
+          content: template,
+          covered_through_entry_id: leafId,
+          source_session_id: ctx.sessionManager.getSessionId(),
+          base_context_sha256: current?.sha256,
+        });
+
+        ctx.ui.notify(`Flushed to ${receipt.checkpoint_id}; triggering compaction...`, "info");
+
+        // Trigger compaction actively
+        ctx.compact({
+          customInstructions: `Checkpoint ${receipt.checkpoint_id}`,
+          onComplete: () => {
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Compaction complete for ${receipt.checkpoint_id}`, "info");
+            }
+          },
+          onError: (err) => {
+            if (ctx.hasUI) {
+              ctx.ui.notify(`Compaction failed: ${err.message}`, "error");
+            }
+          },
+        });
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
