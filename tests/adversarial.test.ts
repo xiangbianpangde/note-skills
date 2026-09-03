@@ -17,6 +17,7 @@ import {
   acquireLockFile,
   releaseLockFile,
 } from "../src/index.ts";
+import { validateProjectContext } from "../src/storage.ts";
 import projectMemoryExtension from "../extensions/note-skills.ts";
 
 function extensionHarness() {
@@ -207,12 +208,13 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     );
   }
 
-  // Attack 3: Substring-presence semantic bypass attempts must be rejected (Sol audit P1-NEGATIVE-WIPEOUT-A)
+  // Attack 3: Substring-presence and inline strikethrough semantic bypass attempts must be rejected (Sol audit P1-NEGATIVE-WIPEOUT-A)
   // Even though the old constraint string appears in the text, it is not an active constraint.
   const substringBypassAttempts = [
     "- This constraint is NO LONGER ACTIVE: Do not deploy before security audit",
     "- Historical/removed constraint: Do not deploy before security audit",
     "- ~~Do not deploy before security audit~~",
+    "- Do not deploy ~~before security audit~~",
     "- Ignore the following old rule: Do not deploy before security audit",
     "<!-- Do not deploy before security audit -->",
     "## Negative Constraints / Do Not Assume\n<!-- Do not deploy before security audit -->\n- None specified",
@@ -245,6 +247,9 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     "placeholder placeholder",
     "not valid reason at all",
     "dummy dummy dummy",
+    "asdf qwer zxcvbnm",
+    "xxxx policy qwer",
+    "asdfg ghjkl zxcvb",
   ];
 
   for (const invalidReason of invalidReasons) {
@@ -303,6 +308,38 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     verifiedReceipt?.negative_constraints_relaxation,
     relaxed.negative_constraints_relaxation,
   );
+
+  // 3c: Schema strict closed validation for negative_constraints_relaxation (Sol audit P1-NEGATIVE-WIPEOUT-B)
+  const schemaAttackAudits = [
+    { ...relaxed.negative_constraints_relaxation, timestamp: 123 },
+    { ...relaxed.negative_constraints_relaxation, actor: "" },
+    { ...relaxed.negative_constraints_relaxation, previous_context_sha256: "not-a-sha" },
+    { ...relaxed.negative_constraints_relaxation, removed_constraints: [123, null] },
+    { ...relaxed.negative_constraints_relaxation, extra_forged_field: "injected" },
+  ];
+
+  for (const attackAudit of schemaAttackAudits) {
+    assert.throws(
+      () => {
+        const invalidMeta = {
+          ...cpRelaxed!.metadata,
+          negative_constraints_relaxation: attackAudit,
+        };
+        // validateProjectContext must reject any structural or type flaw in relaxation audit
+        validateProjectContext({
+          metadata: invalidMeta as any,
+          body: cpRelaxed!.body,
+          raw: "mock",
+        }, "adv-02");
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof ProjectMemoryError);
+        assert.equal(err.code, "INVALID_INPUT");
+        return true;
+      },
+      `Schema attack audit ${JSON.stringify(attackAudit)} must be rejected by validateProjectContext`,
+    );
+  }
 });
 
 test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV-AUTH-02 arbitration)", () => {

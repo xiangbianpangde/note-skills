@@ -788,18 +788,82 @@ export function validateProjectContext(
   }
 
   if (m.negative_constraints_relaxation !== undefined) {
-    if (typeof m.negative_constraints_relaxation !== 'object' || m.negative_constraints_relaxation === null) {
-      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation must be an object')
+    if (
+      typeof m.negative_constraints_relaxation !== 'object' ||
+      m.negative_constraints_relaxation === null ||
+      Array.isArray(m.negative_constraints_relaxation)
+    ) {
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'PROJECT_CONTEXT negative_constraints_relaxation must be a non-null object',
+      )
     }
     const r = m.negative_constraints_relaxation as unknown as Record<string, unknown>
+
+    const ALLOWED_RELAXATION_KEYS = new Set([
+      'checkpoint_id',
+      'timestamp',
+      'actor',
+      'previous_context_sha256',
+      'reason',
+      'removed_constraints',
+    ])
+    for (const key of Object.keys(r)) {
+      if (!ALLOWED_RELAXATION_KEYS.has(key)) {
+        throw new ProjectMemoryError(
+          'INVALID_INPUT',
+          `PROJECT_CONTEXT negative_constraints_relaxation contains unauthorized field "${key}"`,
+          { field: key },
+        )
+      }
+    }
+
     if (typeof r.checkpoint_id !== 'string' || !CHECKPOINT_ID_RE.test(r.checkpoint_id)) {
-      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation.checkpoint_id is invalid')
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'PROJECT_CONTEXT negative_constraints_relaxation.checkpoint_id is invalid (must match CP-xxxx)',
+      )
     }
-    if (typeof r.reason !== 'string' || r.reason.trim().length === 0) {
-      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation.reason is invalid')
+    if (typeof r.timestamp !== 'string' || !ISO_RE.test(r.timestamp)) {
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'PROJECT_CONTEXT negative_constraints_relaxation.timestamp must be a valid ISO-8601 string',
+      )
     }
-    if (!Array.isArray(r.removed_constraints)) {
-      throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT negative_constraints_relaxation.removed_constraints must be an array')
+    if (typeof r.actor !== 'string' || r.actor.trim().length === 0 || r.actor.length > 256) {
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'PROJECT_CONTEXT negative_constraints_relaxation.actor must be a non-empty string',
+      )
+    }
+    if (
+      typeof r.previous_context_sha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/i.test(r.previous_context_sha256)
+    ) {
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'PROJECT_CONTEXT negative_constraints_relaxation.previous_context_sha256 must be a 64-hex SHA-256 hash',
+      )
+    }
+    if (typeof r.reason !== 'string' || !isSubstantiveRelaxationReason(r.reason)) {
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'PROJECT_CONTEXT negative_constraints_relaxation.reason must be an auditable substantive justification',
+      )
+    }
+    if (!Array.isArray(r.removed_constraints) || r.removed_constraints.length === 0) {
+      throw new ProjectMemoryError(
+        'INVALID_INPUT',
+        'PROJECT_CONTEXT negative_constraints_relaxation.removed_constraints must be a non-empty array',
+      )
+    }
+    for (const item of r.removed_constraints) {
+      if (typeof item !== 'string' || item.trim().length === 0) {
+        throw new ProjectMemoryError(
+          'INVALID_INPUT',
+          'PROJECT_CONTEXT negative_constraints_relaxation.removed_constraints elements must be non-empty strings',
+        )
+      }
     }
   }
 
@@ -828,9 +892,9 @@ export const ABSENCE_OF_CONSTRAINTS_PATTERN =
 
 export function normalizeConstraint(text: string): string {
   return text
+    .replace(/~~[\s\S]*?~~/g, '') // remove struck-through text completely
     .toLowerCase()
     .replace(/^[-*•\d.\s]+/, '')
-    .replace(/^~~|~~$/g, '')
     .replace(/[`*_~]/g, '')
     .replace(/[.!?;:。！？；：\s]+$/g, '')
     .replace(/\s+/g, ' ')
@@ -857,25 +921,26 @@ export function extractSubstantiveConstraints(body: string): string[] {
 
   const results: string[] = []
   for (const rawLine of lines) {
-    const strippedBullet = rawLine.replace(/^[-*•\d.\s]+/, '').trim()
-    // 2. Ignore strikethrough lines: e.g. ~~Do not deploy~~
-    if (/^~~[\s\S]*~~$/.test(strippedBullet)) {
+    // 2. Strip strikethrough spans inside line: e.g. Do not deploy ~~before security audit~~
+    const withoutStrikethrough = rawLine.replace(/~~[\s\S]*?~~/g, '').trim()
+    const strippedBullet = withoutStrikethrough.replace(/^[-*•\d.\s]+/, '').trim()
+
+    // 3. If line became empty or too short (<3 chars), skip
+    if (strippedBullet.length < 3) {
       continue
     }
 
-    // 3. Ignore lines explicitly marked as inactive / historical / removed
+    // 4. Ignore lines explicitly marked as inactive / historical / removed
     if (inactiveMarkerPattern.test(strippedBullet)) {
       continue
     }
 
-    // 4. Ignore lines matching absence-of-constraints declarations (e.g. "none", "n/a", etc.)
+    // 5. Ignore lines matching absence-of-constraints declarations (e.g. "none", "n/a", etc.)
     if (ABSENCE_OF_CONSTRAINTS_PATTERN.test(strippedBullet)) {
       continue
     }
 
-    if (strippedBullet.length >= 3) {
-      results.push(strippedBullet)
-    }
+    results.push(strippedBullet)
   }
 
   return results
@@ -886,7 +951,22 @@ export function extractSubstantiveConstraintSet(body: string): Set<string> {
   return new Set(list.map(normalizeConstraint).filter(Boolean))
 }
 
+export function isGibberishToken(token: string): boolean {
+  const t = token.toLowerCase().replace(/[^a-z]/g, '')
+  if (!t) return false
+  // Repetitive characters: e.g. "xxxx", "aaaa"
+  if (/(.)\1{2,}/.test(t)) return true
+  // Keyboard smash sequences: asdf, qwer, zxcv, uiop, hjkl, etc.
+  if (/asdf|qwer|zxcv|uiop|hjkl|jklm|werq|dfgh|fghj|ghjk/i.test(t)) return true
+  // 5 or more consecutive consonants (impossible in English vocabulary): e.g. "zxcvbnm", "bcdfgh"
+  if (/[bcdfghjklmnpqrstvwxyz]{5,}/i.test(t)) return true
+  // Words with length >= 4 with no vowels (unless standard abbreviations)
+  if (t.length >= 4 && !/[aeiouy]/i.test(t) && !['sync', 'async', 'rfc', 'http', 'grpc'].includes(t)) return true
+  return false
+}
+
 export function isSubstantiveRelaxationReason(reason: string): boolean {
+  if (typeof reason !== 'string') return false
   const trimmed = reason.trim()
   if (trimmed.length < 15) return false
 
@@ -901,6 +981,13 @@ export function isSubstantiveRelaxationReason(reason: string): boolean {
   const tokens = trimmed.split(/\s+/)
   if (tokens.length < 3) return false
 
+  // Reject if any token is a keyboard smash or gibberish
+  for (const token of tokens) {
+    if (isGibberishToken(token)) {
+      return false
+    }
+  }
+
   const uniqueTokens = new Set(tokens.map((t) => t.toLowerCase()))
   if (uniqueTokens.size <= 1) return false
 
@@ -911,11 +998,11 @@ export function isSubstantiveRelaxationReason(reason: string): boolean {
     'clear', 'at', 'all', 'any', 'some', 'thing', 'text', 'sample', 'foo', 'bar'
   ])
 
-  const nonPlaceholderCount = tokens.filter(
+  const nonPlaceholderTokens = tokens.filter(
     (t) => !placeholderTokens.has(t.toLowerCase().replace(/[^a-z0-9]/g, ''))
-  ).length
+  )
 
-  return nonPlaceholderCount >= 2
+  return nonPlaceholderTokens.length >= 2
 }
 
 export function containsSubstantiveConstraint(text: string): boolean {
