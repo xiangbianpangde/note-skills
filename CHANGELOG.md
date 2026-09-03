@@ -2,7 +2,7 @@
 
 ## 0.5.0 - 2026-09-03
 
-- **v0.5.0 Major Architecture Pivot (P0-A, P0-B, P0-C & P0-D)**: From long-term memory archive alone to a 2-Layer Working Memory & Context Offload system.
+- **v0.5.0 Major Architecture Pivot (P0-A, P0-B, P0-C, P0-D & P0-E complete)**: From long-term memory archive alone to a 2-Layer Working Memory & Context Offload system.
   - **P0-A Contract & Peer Dependency**:
     - Peer dependency updated: `@earendil-works/pi-coding-agent >=0.84.4`.
     - Formally established Two-Dimensional Authority Model: `PROJECT_CONTEXT.md` carries `authority: working_projection` (non-authoritative state projection, canonical truth overrides).
@@ -20,7 +20,9 @@
     - `before_agent_start`: automatically detects and injects `PROJECT_CONTEXT.md` wrapped in a non-authoritative security envelope (`authority: working_projection`) explicitly stating that canonical files override and no permissions are elevated.
     - Git Branch Staleness Guard: compares checkpoint's `git_branch` with live repository branch; warns `CONTEXT_STALE` on mismatch to prevent cross-branch context contamination (§6.2).
     - Context Independence Test: multi-process automated benchmark in `tests/scenario.test.ts` proving a fresh blank session with zero conversation history continues tasks seamlessly and preserves negative constraints.
-  - Regression tests: 73 -> 80 tests.
+  - **P0-E 12-Failure-Mode Adversarial Test Suite**:
+    - Dedicated `tests/adversarial.test.ts` covering all 12 adversarial scenarios requested by Sol: (1) ordinary resume, (2) negative constraint retention, (3) canonical conflict precedence (INV-AUTH-02), (4) external human edit CAS defense, (5) branch drift detection, (6) corrupted context fail-closed, (7) corrupted checkpoint fail-closed, (8) mid-run overflow Mode B fallback, (9) unresolved candidate compaction blocking, (10) secret pattern blocking (POLICY_VIOLATION), (11) 5KB budget exceeding (BUDGET_EXCEEDED), (12) concurrent writers lock serialization.
+  - Regression tests: 73 -> 92 tests (100% passing).
 
 ## 0.4.5 - 2026-09-02
 
