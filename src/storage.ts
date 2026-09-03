@@ -812,10 +812,10 @@ export function containsSubstantiveConstraint(text: string): boolean {
     .map((l) => l.replace(/^[-*•\d.\s]+/, '').trim())
     .filter(Boolean)
   if (lines.length === 0) return false
-  // Check if every line is merely stating absence of constraints:
-  // e.g. "none specified", "no constraints", "none", "not specified", "none currently", "n/a", "暂无", "无特别约束", "暂无约束"
+  // Filter out any line that merely declares absence of constraints:
+  // e.g. "none specified", "nothing specified", "no constraints", "constraints: none", "n.a.", "n/a", "无任何限制", "暂无", "无约束", etc.
   const nonConstraintPattern =
-    /^(?:none(?:\s+\w+)?|no\s+\w+|not\s+\w+|n\/?a|nil|empty|null|无|暂无|没有|未指定|无约束|无特别|不适用|尚无)[\s\w.]*$/i
+    /^(?:constraints?[:：]?\s*)?(?:none|nothing|no(?:\s+|$)|not(?:\s+|$)|n[\/.]?a[\/.]?|nil|empty|null|无|暂无|没有|未指定|无任何|无特别|不适用|尚无)[\s\S]*$/i
   const substantive = lines.filter((line) => !nonConstraintPattern.test(line) && line.length >= 3)
   return substantive.length > 0
 }

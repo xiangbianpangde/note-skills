@@ -113,8 +113,13 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     "- none specified",
     "- None Specified",
     "- NONE SPECIFIED",
+    "- Nothing specified",
+    "- Constraints: none",
+    "- N.A.",
     "- n/a",
-    "- 暂无",
+    "- 无任何限制",
+    "- 暂无约束",
+    "- 无特别约束",
   ];
 
   for (const trivial of trivialAttempts) {
@@ -160,7 +165,14 @@ test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV
   const contradictionPhrases = [
     "milestone P0 is complete",
     "Milestone P0 has been completed and verified",
-    "P0 completion has been achieved",
+    "Completed milestone P0",
+    "P0 has passed all acceptance criteria",
+    "P0 is fully shipped",
+    "P0 has been signed off",
+    "P0 已验收通过",
+    "P0 已经闭环",
+    "已完成 P0",
+    "P0 已完成",
   ];
 
   for (const phrase of contradictionPhrases) {
@@ -211,6 +223,27 @@ test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV
   assert.match(result.message.content, /CANONICAL TRUTH PRECEDES WORKING PROJECTION/);
   // Operational state is suppressed
   assert.equal(/Continue milestone P0/.test(result.message.content), false);
+
+  // 5. Test Chinese milestone key (e.g. 阶段一)
+  const cwdZh = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-adv-03-zh-"));
+  fs.writeFileSync(path.join(cwdZh, "state.yaml"), "milestones:\n  阶段一: in_progress\n");
+  const pmZh = new ProjectMemory(cwdZh);
+  pmZh.init({ project_id: "adv-03-zh", canonical_state_file: "state.yaml" });
+
+  assert.throws(
+    () =>
+      pmZh.flushWorkingContext({
+        content: validContextBody("阶段一任务", "阶段一 已完成"),
+        covered_through_entry_id: "turn-03-zh",
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof ProjectMemoryError);
+      assert.equal(err.code, "CONFLICT");
+      assert.match(err.message, /阶段一/);
+      return true;
+    },
+    "Chinese milestone key with completed suffix must trigger CONFLICT",
+  );
 });
 
 test("P0-E (4/12): External file edit by human triggers CONTEXT_CONFLICT; base hash is mandatory on update", () => {
@@ -265,20 +298,26 @@ test("P0-E (5/12): Branch drift fail-closed (including Git worktree .git file): 
   const pm = new ProjectMemory(cwd);
   pm.init({ project_id: "adv-05" });
 
-  // Simulate Git worktree: .git is a file pointing to a gitdir!
-  const actualGitDir = fs.mkdtempSync(path.join(os.tmpdir(), "actual-git-dir-"));
-  fs.mkdirSync(path.join(actualGitDir, "refs", "heads"), { recursive: true });
-  fs.writeFileSync(path.join(actualGitDir, "HEAD"), "ref: refs/heads/main\n");
-  fs.writeFileSync(path.join(actualGitDir, "refs", "heads", "main"), "1122334455667788990011223344556677889900\n");
+  // Simulate real Git linked worktree layout with commondir & packed-refs:
+  const commonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), "common-git-dir-"));
+  fs.writeFileSync(
+    path.join(commonGitDir, "packed-refs"),
+    "# pack-refs with: peeled fully-peeled sorted\n1122334455667788990011223344556677889900 refs/heads/main\n",
+  );
 
-  fs.writeFileSync(path.join(cwd, ".git"), `gitdir: ${actualGitDir}\n`);
+  const worktreeGitDir = fs.mkdtempSync(path.join(os.tmpdir(), "worktree-git-dir-"));
+  fs.writeFileSync(path.join(worktreeGitDir, "commondir"), `${commonGitDir}\n`);
+  fs.writeFileSync(path.join(worktreeGitDir, "HEAD"), "ref: refs/heads/main\n");
 
-  // Flush without passing git_branch -> service must automatically resolve worktree and collect 'main'
+  fs.writeFileSync(path.join(cwd, ".git"), `gitdir: ${worktreeGitDir}\n`);
+
+  // Flush without passing git_branch -> service must automatically resolve linked worktree commondir and collect 'main'
   const receipt = pm.flushWorkingContext({
     content: validContextBody("Feature Secret", "Deploy feature secret to production"),
     covered_through_entry_id: "t-05",
   });
   assert.equal(receipt.git_branch, "main");
+  assert.equal(receipt.git_head, "1122334455667788990011223344556677889900");
 
   const { events } = extensionHarness();
   const notifications: string[] = [];
@@ -295,7 +334,7 @@ test("P0-E (5/12): Branch drift fail-closed (including Git worktree .git file): 
   };
 
   // Switch branch in the worktree gitdir
-  fs.writeFileSync(path.join(actualGitDir, "HEAD"), "ref: refs/heads/release-v2\n");
+  fs.writeFileSync(path.join(worktreeGitDir, "HEAD"), "ref: refs/heads/release-v2\n");
 
   const result = (events.get("before_agent_start")!({ prompt: "Status" }, ctx)) as {
     message: { content: string };
@@ -532,13 +571,16 @@ test("P0-E (10/12): External secret injection blocked on read boundary (both met
     covered_through_entry_id: "t-10-clean",
   });
 
-  // 2. Hand-edit PROJECT_CONTEXT on disk to inject secret into frontmatter metadata (Sol P1-1 scenario)
+  // 2. Hand-edit PROJECT_CONTEXT on disk to inject secret into a frontmatter comment (Sol P1-1 YAML comment scenario)
   const ctxFile = projectContextPath(cwd);
   const currentText = fs.readFileSync(ctxFile, "utf8");
-  const frontmatterSecretText = currentText.replace("authority: working_projection", "authority: working_projection\ngit_branch: \"token=supersecretvalue123456\"");
-  fs.writeFileSync(ctxFile, frontmatterSecretText);
+  const commentSecretText = currentText.replace(
+    "authority: working_projection",
+    "authority: working_projection\n# secret token=supersecretvalue123456 in yaml comment",
+  );
+  fs.writeFileSync(ctxFile, commentSecretText);
 
-  // 3. Read boundary must detect secret in frontmatter metadata and fail closed!
+  // 3. Read boundary must detect secret in raw bytes (even inside YAML comment) and fail closed!
   assert.throws(
     () => pm.readWorkingContext(),
     (err: unknown) => {

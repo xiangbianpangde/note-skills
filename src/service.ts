@@ -2308,9 +2308,9 @@ export class ProjectMemory {
     const ctx = readProjectContext(this.cwd)
     if (!ctx) return null
     const cfg = readConfig(this.cwd)
-    // 1. Re-scan secrets on read boundary across BOTH metadata and body first
+    // 1. Re-scan secrets on read boundary across raw file bytes (including YAML comments, frontmatter, and body)
     const secretHits = findSecretMatches(
-      { metadata: ctx.metadata as unknown as Record<string, unknown>, body: ctx.body },
+      { raw: ctx.raw, metadata: ctx.metadata as unknown as Record<string, unknown>, body: ctx.body },
       secretRulesFor(cfg),
       '$workingContext',
     )
@@ -2372,11 +2372,7 @@ export class ProjectMemory {
     // Check milestones
     for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
       if (status !== 'complete' && status !== 'done') {
-        const re = new RegExp(
-          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|shipped|signed\\s+off|passed|acceptance\\s+criteria|achieved|verified|已完成|完成|实现|验收通过|闭环)`,
-          'i',
-        )
-        if (re.test(context.body)) {
+        if (isMilestoneAssertedComplete(context.body, milestone)) {
           return {
             reason: `working context asserts milestone "${milestone}" is complete, but canonical state records "${status}"`,
             canonical_ref: cfg.canonical_state_file ?? 'canonical state',
@@ -2393,11 +2389,7 @@ export class ProjectMemory {
     const cfg = readConfig(this.cwd)
     for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
       if (status !== 'complete' && status !== 'done') {
-        const re = new RegExp(
-          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|shipped|signed\\s+off|passed|acceptance\\s+criteria|achieved|verified|已完成|完成|实现|验收通过|闭环)`,
-          'i',
-        )
-        if (re.test(body)) {
+        if (isMilestoneAssertedComplete(body, milestone)) {
           throw new ProjectMemoryError(
             'CONFLICT',
             `working context contradicts canonical milestone "${milestone}": canonical state records "${status}", but context asserts complete (per INV-AUTH-02, canonical truth overrides)`,
@@ -3534,6 +3526,43 @@ function readIndexStats(cwd: string): { notes: number; triggers: number } {
   }
 }
 
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function isMilestoneAssertedComplete(body: string, milestone: string): boolean {
+  const escaped = escapeRegex(milestone)
+  const completionWords = [
+    'complete',
+    'completed',
+    'completion',
+    'done',
+    'finished',
+    'shipped',
+    'signed\\s+off',
+    'passed(?:\\s+all)?(?:\\s+acceptance)?(?:\\s+criteria)?',
+    'acceptance\\s+criteria',
+    'achieved',
+    'verified',
+    '已完成',
+    '完成',
+    '已实现',
+    '实现',
+    '验收通过',
+    '已验收',
+    '闭环',
+    '已闭环',
+  ]
+  const compPattern = completionWords.join('|')
+
+  // Direction 1: milestone ... within 60 chars ... completed
+  const dir1 = new RegExp(`(?:${escaped})[\\s\\S]{0,60}?(?:${compPattern})`, 'iu')
+  // Direction 2: completed ... within 60 chars ... milestone (e.g. "Completed milestone P0", "已完成 P0", "验收通过 P0")
+  const dir2 = new RegExp(`(?:${compPattern})[\\s\\S]{0,60}?(?:${escaped})`, 'iu')
+
+  return dir1.test(body) || dir2.test(body)
+}
 
 /* ================================================================== */
 /* Standalone API (extension/tests friendly)                           */
