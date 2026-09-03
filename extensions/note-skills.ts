@@ -122,6 +122,9 @@ const Params = Type.Object({
   base_context_sha256: Type.Optional(
     Type.String({ description: "Expected sha256 of current PROJECT_CONTEXT.md for CAS check" }),
   ),
+  relax_negative_constraints_reason: Type.Optional(
+    Type.String({ description: "Explicit auditable reason when removing or relaxing existing negative constraints" }),
+  ),
 });
 
 export interface CaptureSignal {
@@ -762,6 +765,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
             covered_through_entry_id: covered,
             source_session_id: ctx.sessionManager.getSessionId(),
             base_context_sha256: params.base_context_sha256,
+            relax_negative_constraints_reason: params.relax_negative_constraints_reason,
           });
           pi.appendEntry("note-skills-flush-receipt", receipt);
           result = receipt;
@@ -775,6 +779,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
             covered_through_entry_id: covered,
             source_session_id: ctx.sessionManager.getSessionId(),
             base_context_sha256: params.base_context_sha256,
+            relax_negative_constraints_reason: params.relax_negative_constraints_reason,
           });
           pi.appendEntry("note-skills-flush-receipt", receipt);
           ctx.compact({

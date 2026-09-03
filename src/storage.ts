@@ -806,6 +806,31 @@ export function validateProjectContext(
   }
 }
 
+export const ABSENCE_OF_CONSTRAINTS_PATTERN =
+  /^(?:(?:(?:negative\s+)?constraints?|notes?|(?:负向)?(?:约束|限制|要求))[:：]\s*)?(?:none(?:\s+(?:specified|reported|currently|at\s+this\s+time|yet|known))?|nothing(?:\s+(?:specified|here|to\s+report|yet))?|no(?:\s+(?:known\s+|additional\s+|special\s+)?(?:negative\s+)?(?:constraints?|special\s+constraints?|limitations?|restrictions?|assumptions?)(?:\s+(?:specified|reported|currently|at\s+this\s+time|yet|known))?)|not(?:\s+(?:specified|applicable|defined|known))|there\s+(?:are|aren't|is|isn't)\s+(?:no|any)\s+(?:known\s+|additional\s+|special\s+)?(?:negative\s+)?(?:constraints?|limitations?|restrictions?)|n[\/.]?a[\/.]?|nil|empty|null|tbd|todo|none\.|n\/a\.|(?:当前|暂时|目前)?(?:无|暂无|没有|未指定|不适用|尚无|空)(?:任何)?(?:负向)?(?:特别|特殊|附加)?(?:约束|限制|要求)?)[.!?。！？\s]*$/i
+
+export function normalizeConstraint(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/^[-*•\d.\s]+/, '')
+    .replace(/[.!?;:。！？；：\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+export function extractSubstantiveConstraints(body: string): string[] {
+  const match = body.match(
+    /##\s*(?:negative\s*constraints|do\s*not\s*assume)(?:\s*[/|]\s*(?:negative\s*constraints|do\s*not\s*assume))?\s*\n+([\s\S]*?)(?=\n+##|$)/i,
+  )
+  const content = match?.[1]?.trim()
+  if (!content) return []
+  const lines = content
+    .split('\n')
+    .map((l) => l.replace(/^[-*•\d.\s]+/, '').trim())
+    .filter(Boolean)
+  return lines.filter((line) => line.length >= 3 && !ABSENCE_OF_CONSTRAINTS_PATTERN.test(line))
+}
+
 export function containsSubstantiveConstraint(text: string): boolean {
   const lines = text
     .split('\n')
@@ -813,14 +838,9 @@ export function containsSubstantiveConstraint(text: string): boolean {
     .filter(Boolean)
   if (lines.length === 0) return false
 
-  // Match ONLY closed-set declarations of absence of constraints.
-  // NEVER use wildcards like "no .*", "not .*", "无.*", or "没有.*" which swallow real negative constraints!
-  const absenceOfConstraintsPattern =
-    /^(?:(?:(?:negative\s+)?constraints?|notes?|(?:负向)?(?:约束|限制|要求))[:：]\s*)?(?:none(?:\s+(?:specified|reported|currently|at\s+this\s+time|yet|known))?|nothing(?:\s+(?:specified|here|to\s+report|yet))?|no(?:\s+(?:known\s+)?(?:negative\s+)?(?:constraints?|special\s+constraints?|limitations?|restrictions?|assumptions?))|not(?:\s+(?:specified|applicable|defined|known))|there\s+are\s+no\s+(?:known\s+)?(?:negative\s+)?(?:constraints?|limitations?|restrictions?)|n[\/.]?a[\/.]?|nil|empty|null|tbd|todo|none\.|n\/a\.|无|暂无|没有|未指定|不适用|尚无|空|无(?:任何)?(?:负向)?(?:特别)?(?:约束|限制|要求)|暂无(?:任何)?(?:负向)?(?:特别)?(?:约束|限制|要求)|没有(?:发现)?(?:任何)?(?:负向)?(?:特别)?(?:约束|限制|要求)|未指定(?:约束|限制|要求)?)[.!?。！？\s]*$/i
-
   const substantive = lines.filter((line) => {
     if (line.length < 3) return false
-    return !absenceOfConstraintsPattern.test(line)
+    return !ABSENCE_OF_CONSTRAINTS_PATTERN.test(line)
   })
   return substantive.length > 0
 }

@@ -107,7 +107,7 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
   });
   assert.equal(r1.checkpoint_id, "CP-0001");
 
-  // Attack 1: Attempting to silently wipe negative constraints with various casing & placeholders
+  // Attack 1: Attempting to silently wipe negative constraints with various casing, placeholders, and absence-phrase synonyms
   const trivialAttempts = [
     "- None specified",
     "- none specified",
@@ -120,6 +120,15 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     "- 无任何限制",
     "- 暂无约束",
     "- 无特别约束",
+    // Sol audit counter-examples:
+    "- No constraints specified",
+    "- No additional constraints",
+    "- There are no special constraints",
+    "- There aren't any constraints",
+    "- No restrictions currently",
+    "- 当前无约束",
+    "- 暂时没有约束",
+    "- 目前没有任何限制",
   ];
 
   for (const trivial of trivialAttempts) {
@@ -133,7 +142,7 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
       (err: unknown) => {
         assert.ok(err instanceof ProjectMemoryError);
         assert.equal(err.code, "POLICY_VIOLATION");
-        assert.match(err.message, /silent deletion of negative constraints is forbidden/);
+        assert.match(err.message, /silent deletion or relaxation of negative constraints is forbidden/);
         return true;
       },
       `Trivial negative constraint wipeout attempt "${trivial}" must be rejected`,
@@ -162,12 +171,14 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     "- 没有测试覆盖的代码禁止合并",
   ];
 
+  let accumulatedConstraints = "- Do not deploy before security audit";
   let currentSha = cp2!.sha256;
   for (let i = 0; i < realConstraints.length; i++) {
     const realConstraint = realConstraints[i];
-    // Updating to a real constraint must succeed
+    accumulatedConstraints += `\n${realConstraint}`;
+    // Updating while preserving previous constraints and adding a new real constraint must succeed
     const res = pm.flushWorkingContext({
-      content: validContextBody("Refactor storage", "Implement write locks", realConstraint),
+      content: validContextBody("Refactor storage", "Implement write locks", accumulatedConstraints),
       covered_through_entry_id: `turn-002-real-${i}`,
       base_context_sha256: currentSha,
     });
@@ -178,7 +189,7 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
     assert.ok(read);
     assert.match(read.body, new RegExp(realConstraint.replace(/^-\s*/, "")));
 
-    // Attempting to wipe this real constraint with "none" or "无" must throw POLICY_VIOLATION
+    // Attempting to wipe these real constraints with "- none" must throw POLICY_VIOLATION
     assert.throws(
       () =>
         pm.flushWorkingContext({
@@ -189,12 +200,41 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
       (err: unknown) => {
         assert.ok(err instanceof ProjectMemoryError);
         assert.equal(err.code, "POLICY_VIOLATION");
-        assert.match(err.message, /silent deletion of negative constraints is forbidden/);
+        assert.match(err.message, /silent deletion or relaxation of negative constraints is forbidden/);
         return true;
       },
-      `Attempt to wipe real constraint "${realConstraint}" with "- none" must be rejected`,
+      `Attempt to wipe real constraints with "- none" must be rejected`,
     );
   }
+
+  // Behavior 3: Explicit, auditable relaxation reason allows removing/modifying negative constraints
+  // 3a: Trivial reason is rejected
+  assert.throws(
+    () =>
+      pm.flushWorkingContext({
+        content: validContextBody("Refactor storage", "Implement write locks", "- None specified"),
+        covered_through_entry_id: "turn-002-relax-trivial",
+        base_context_sha256: currentSha,
+        relax_negative_constraints_reason: "n/a",
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof ProjectMemoryError);
+      assert.equal(err.code, "POLICY_VIOLATION");
+      return true;
+    },
+    "Trivial relaxation reason (< 8 chars) must be rejected",
+  );
+
+  // 3b: Substantive auditable reason is accepted
+  const relaxed = pm.flushWorkingContext({
+    content: validContextBody("Refactor storage", "Implement write locks", "- None specified"),
+    covered_through_entry_id: "turn-002-relax-approved",
+    base_context_sha256: currentSha,
+    relax_negative_constraints_reason: "Security audit successfully completed and signed off by lead architect",
+  });
+  assert.equal(relaxed.status, "FLUSH_VERIFIED");
+  const cpRelaxed = pm.readWorkingContext();
+  assert.match(cpRelaxed!.body, /None specified/);
 });
 
 test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV-AUTH-02 arbitration)", () => {

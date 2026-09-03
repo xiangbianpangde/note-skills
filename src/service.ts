@@ -123,6 +123,8 @@ import {
   ensureMemoryDirs,
   assertMemoryRootSafe,
   extractNegativeConstraints,
+  extractSubstantiveConstraints,
+  normalizeConstraint,
   tryReadGitIdentity,
 } from './storage.ts'
 import type { ConfigFile, ScannedRaw, ScanIssue, IndexSnapshot } from './storage.ts'
@@ -2182,16 +2184,39 @@ export class ProjectMemory {
         )
       }
 
-      // Negative constraints protection (Item 2 & Sol review):
-      // Never allow silent deletion of existing negative constraints
-      const prevNegative = extractNegativeConstraints(currentContext.body)
-      const newNegative = extractNegativeConstraints(body)
-      if (prevNegative && !newNegative) {
-        throw new ProjectMemoryError(
-          'POLICY_VIOLATION',
-          'silent deletion of negative constraints is forbidden: previous context had active constraints in "## Negative Constraints / Do Not Assume" (§3.3)',
-          { previous_negative_constraints: prevNegative },
+      // Negative constraints protection (INV-AUTH-02 & Sol review):
+      // Mandatory preservation check: Any substantive negative constraints in the previous context
+      // MUST be preserved in the new context, unless explicit auditable relaxation is provided.
+      const prevConstraints = extractSubstantiveConstraints(currentContext.body)
+      if (prevConstraints.length > 0) {
+        const newNegativeMatch = body.match(
+          /##\s*(?:negative\s*constraints|do\s*not\s*assume)(?:\s*[/|]\s*(?:negative\s*constraints|do\s*not\s*assume))?\s*\n+([\s\S]*?)(?=\n+##|$)/i,
         )
+        const newNegativeContent = newNegativeMatch?.[1]?.trim() ?? ''
+        const normalizedNewSection = newNegativeContent.toLowerCase().replace(/\s+/g, ' ')
+
+        const missingConstraints = prevConstraints.filter((prev) => {
+          const normPrev = normalizeConstraint(prev)
+          if (!normPrev) return false
+          return !normalizedNewSection.includes(normPrev)
+        })
+
+        if (missingConstraints.length > 0) {
+          const hasExplicitRelaxation =
+            typeof input.relax_negative_constraints_reason === 'string' &&
+            input.relax_negative_constraints_reason.trim().length >= 8
+
+          if (!hasExplicitRelaxation) {
+            throw new ProjectMemoryError(
+              'POLICY_VIOLATION',
+              `silent deletion or relaxation of negative constraints is forbidden: previous context had active constraints that were not preserved in the new context. Missing: ${missingConstraints.map((c) => `"${c}"`).join(', ')}. To relax or remove constraints, supply an auditable relax_negative_constraints_reason (§3.3)`,
+              {
+                missing_constraints: missingConstraints,
+                previous_constraints: prevConstraints,
+              },
+            )
+          }
+        }
       }
     } else {
       if (input.base_context_sha256 && input.base_context_sha256 !== '') {

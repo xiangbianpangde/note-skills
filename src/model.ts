@@ -493,4 +493,9 @@ export interface FlushInput {
   git_branch?: string
   git_head?: string
   workspace_fingerprint?: string
+  /**
+   * Explicit, auditable reason required when deleting or relaxing existing substantive negative constraints.
+   * Without this, all previous substantive negative constraints must be preserved (§3.3).
+   */
+  relax_negative_constraints_reason?: string
 }
