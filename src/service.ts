@@ -2162,16 +2162,6 @@ export class ProjectMemory {
       }
     }
 
-    // Check secrets on body
-    const secretHits = findSecretMatches({ body }, secretRulesFor(cfg), '$workingContext')
-    if (secretHits.length) {
-      throw new ProjectMemoryError(
-        'POLICY_VIOLATION',
-        'PROJECT_CONTEXT body violates secret policy (no credentials/tokens in working context)',
-        { matched: secretHits.map((hit) => `${hit.rule}@${hit.path}`) },
-      )
-    }
-
     const currentContext = readProjectContext(this.cwd)
     const currentSha256 = currentContext ? currentContext.sha256 : ''
 
@@ -2196,7 +2186,7 @@ export class ProjectMemory {
       // Never allow silent deletion of existing negative constraints
       const prevNegative = extractNegativeConstraints(currentContext.body)
       const newNegative = extractNegativeConstraints(body)
-      if (prevNegative && (!newNegative || newNegative === '- None specified')) {
+      if (prevNegative && !newNegative) {
         throw new ProjectMemoryError(
           'POLICY_VIOLATION',
           'silent deletion of negative constraints is forbidden: previous context had active constraints in "## Negative Constraints / Do Not Assume" (§3.3)',
@@ -2237,6 +2227,20 @@ export class ProjectMemory {
       workspace_fingerprint: input.workspace_fingerprint,
       base_context_sha256: currentSha256,
       generated_at: nowIso,
+    }
+
+    // Check secrets across BOTH metadata and body (Read/Write Trust Boundary)
+    const secretHits = findSecretMatches(
+      { metadata: metadata as unknown as Record<string, unknown>, body },
+      secretRulesFor(cfg),
+      '$workingContext',
+    )
+    if (secretHits.length) {
+      throw new ProjectMemoryError(
+        'POLICY_VIOLATION',
+        'PROJECT_CONTEXT violates secret policy (secret detected in working context metadata or body)',
+        { matched: secretHits.map((hit) => `${hit.rule}@${hit.path}`) },
+      )
     }
 
     const fullMarkdown = serializeProjectContext(metadata, body)
@@ -2306,8 +2310,12 @@ export class ProjectMemory {
     const cfg = readConfig(this.cwd)
     // Re-validate size budget, schema, authority, required sections on read boundary
     validateProjectContext(ctx, cfg.project_id)
-    // Re-scan secrets on read boundary
-    const secretHits = findSecretMatches({ body: ctx.body }, secretRulesFor(cfg), '$workingContext')
+    // Re-scan secrets on read boundary across BOTH metadata and body
+    const secretHits = findSecretMatches(
+      { metadata: ctx.metadata as unknown as Record<string, unknown>, body: ctx.body },
+      secretRulesFor(cfg),
+      '$workingContext',
+    )
     if (secretHits.length) {
       throw new ProjectMemoryError(
         'POLICY_VIOLATION',
@@ -2332,7 +2340,7 @@ export class ProjectMemory {
       return null
     }
 
-    // 2. Parse checkpoint frontmatter and cross-verify metadata fields
+    // 2. Parse checkpoint frontmatter and cross-verify metadata fields strictly
     let parsedCp: { metadata: ProjectContextMetadata; body: string }
     try {
       parsedCp = parseProjectContext(cpText)
@@ -2344,8 +2352,9 @@ export class ProjectMemory {
       cpMeta.checkpoint_id !== receipt.checkpoint_id ||
       cpMeta.covered_through_entry_id !== receipt.covered_through_entry_id ||
       cpMeta.source_session_id !== receipt.source_session_id ||
-      (receipt.git_head !== undefined && cpMeta.git_head !== receipt.git_head) ||
-      (receipt.git_branch !== undefined && cpMeta.git_branch !== receipt.git_branch)
+      (cpMeta.git_head ?? null) !== (receipt.git_head ?? null) ||
+      (cpMeta.git_branch ?? null) !== (receipt.git_branch ?? null) ||
+      (cpMeta.workspace_fingerprint ?? null) !== (receipt.workspace_fingerprint ?? null)
     ) {
       return null // Tampered receipt or mismatched checkpoint metadata!
     }
@@ -2364,7 +2373,7 @@ export class ProjectMemory {
     for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
       if (status !== 'complete' && status !== 'done') {
         const re = new RegExp(
-          `(?:milestone\\s+)?${milestone}\\s*(?:is|:)?\\s*(?:complete|done|completed|已完成)`,
+          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|achieved|verified|已完成|完成|实现)`,
           'i',
         )
         if (re.test(context.body)) {
@@ -2385,7 +2394,7 @@ export class ProjectMemory {
     for (const [milestone, status] of Object.entries(state.milestones ?? {})) {
       if (status !== 'complete' && status !== 'done') {
         const re = new RegExp(
-          `(?:milestone\\s+)?${milestone}\\s*(?:is|:)?\\s*(?:complete|done|completed|已完成)`,
+          `(?:milestone\\s+)?\\b${milestone}\\b[\\s\\S]{0,60}?(?:complete|completed|done|finished|achieved|verified|已完成|完成|实现)`,
           'i',
         )
         if (re.test(body)) {

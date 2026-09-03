@@ -737,6 +737,24 @@ export function validateProjectContext(
   if (!m.covered_through_entry_id || typeof m.covered_through_entry_id !== 'string') {
     throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT covered_through_entry_id is required')
   }
+  if (typeof m.source_session_id !== 'string' || m.source_session_id.trim() === '') {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT source_session_id must be a non-empty string')
+  }
+  if (typeof m.base_context_sha256 !== 'string') {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT base_context_sha256 must be a string')
+  }
+  if (typeof m.generated_at !== 'string' || isNaN(Date.parse(m.generated_at))) {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT generated_at must be valid ISO timestamp')
+  }
+  if (m.git_branch !== undefined && typeof m.git_branch !== 'string') {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT git_branch must be a string')
+  }
+  if (m.git_head !== undefined && typeof m.git_head !== 'string') {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT git_head must be a string')
+  }
+  if (m.workspace_fingerprint !== undefined && typeof m.workspace_fingerprint !== 'string') {
+    throw new ProjectMemoryError('INVALID_INPUT', 'PROJECT_CONTEXT workspace_fingerprint must be a string')
+  }
 
   // Validate required sections in body (§3.3 Anti-Mini-Wiki Rules)
   const lowerBody = context.body.toLowerCase()
@@ -758,12 +776,25 @@ export function validateProjectContext(
   }
 }
 
+function isTrivialNegativeConstraint(text: string): boolean {
+  const lines = text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  if (lines.length === 0) return true
+  // Case-insensitive check: none specified, none, n/a, 无, 暂无, etc.
+  const placeholderRe = /^[-*•\d.]*\s*(?:none(?:\s+specified)?|n\/a|nil|empty|无|暂无|未指定|无约束)[\s.]*$/i
+  return lines.every((line) => placeholderRe.test(line))
+}
+
 export function extractNegativeConstraints(body: string): string | undefined {
   const match = body.match(
     /##\s*(?:negative\s*constraints|do\s*not\s*assume)(?:\s*[/|]\s*(?:negative\s*constraints|do\s*not\s*assume))?\s*\n+([\s\S]*?)(?=\n+##|$)/i,
   )
   const content = match?.[1]?.trim()
-  return content && content !== '- None specified' ? content : undefined
+  if (!content) return undefined
+  if (isTrivialNegativeConstraint(content)) return undefined
+  return content
 }
 
 export function tryReadGitIdentity(cwd: string): { branch?: string; head?: string } {

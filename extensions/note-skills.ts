@@ -13,6 +13,7 @@ import {
   sha256hex,
   writeFileAtomic,
   extractNegativeConstraints,
+  tryReadGitIdentity,
   type CanonicalTargetKind,
   type CaptureInput,
   type NoteType,
@@ -197,15 +198,7 @@ function hasConfig(cwd: string): boolean {
 }
 
 function tryReadCurrentGitBranch(cwd: string): string | undefined {
-  try {
-    const gitHead = path.join(cwd, ".git", "HEAD");
-    if (!fs.existsSync(gitHead)) return undefined;
-    const content = fs.readFileSync(gitHead, "utf8").trim();
-    const match = /^ref: refs\/heads\/(.+)$/.exec(content);
-    return match ? match[1] : content.slice(0, 8);
-  } catch {
-    return undefined;
-  }
+  return tryReadGitIdentity(cwd).branch;
 }
 
 function workingContextEnvelope(context: ProjectContext, currentBranch?: string): string {
@@ -1155,6 +1148,23 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
         at: new Date().toISOString(),
       });
       return; // Mode B
+    }
+
+    // INV-COMPACT-01 check (§P1-4 Sol review):
+    // If the entry immediately following coveredIndex is a toolResult (meaning coveredId
+    // was an assistant tool call whose toolResult was NOT checkpointed), we cannot cut
+    // without evicting an uncheckpointed toolResult! Mode A is strictly FORBIDDEN -> Mode B!
+    if (coveredIndex < branchEntries.length - 1) {
+      const immediateNext = branchEntries[coveredIndex + 1] as { message?: { role?: string }; type?: string; id?: string };
+      if (immediateNext?.message?.role === "toolResult") {
+        pi.appendEntry("note-skills-compaction", {
+          mode: "emergency_safe",
+          reason: event?.reason ?? "manual",
+          cause: "uncheckpointed_tool_result_after_covered_entry",
+          at: new Date().toISOString(),
+        });
+        return; // Mode B
+      }
     }
 
     // Compute aggressive cut boundary (Retention Frontier):

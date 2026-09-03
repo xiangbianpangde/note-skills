@@ -74,7 +74,7 @@ function validContextBody(
 }
 
 /* ================================================================== */
-/* P0-E: 12 Adversarial Failure Mode Tests (§8 & §21 Architecture)    */
+/* P0-E: 12 Hardened Adversarial Failure Mode Tests (Sol Sign-off)    */
 /* ================================================================== */
 
 test("P0-E (1/12): Ordinary resume loads working context cleanly", () => {
@@ -107,21 +107,33 @@ test("P0-E (2/12): Negative constraints anti-wipeout: silent deletion is forbidd
   });
   assert.equal(r1.checkpoint_id, "CP-0001");
 
-  // Attack 1: Attempting to silently wipe negative constraints with "- None specified"
-  assert.throws(
-    () =>
-      pm.flushWorkingContext({
-        content: validContextBody("Refactor storage", "Implement write locks", "- None specified"),
-        covered_through_entry_id: "turn-002b",
-        base_context_sha256: r1.new_context_sha256,
-      }),
-    (err: unknown) => {
-      assert.ok(err instanceof ProjectMemoryError);
-      assert.equal(err.code, "POLICY_VIOLATION");
-      assert.match(err.message, /silent deletion of negative constraints is forbidden/);
-      return true;
-    },
-  );
+  // Attack 1: Attempting to silently wipe negative constraints with various casing & placeholders
+  const trivialAttempts = [
+    "- None specified",
+    "- none specified",
+    "- None Specified",
+    "- NONE SPECIFIED",
+    "- n/a",
+    "- 暂无",
+  ];
+
+  for (const trivial of trivialAttempts) {
+    assert.throws(
+      () =>
+        pm.flushWorkingContext({
+          content: validContextBody("Refactor storage", "Implement write locks", trivial),
+          covered_through_entry_id: "turn-002b",
+          base_context_sha256: r1.new_context_sha256,
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof ProjectMemoryError);
+        assert.equal(err.code, "POLICY_VIOLATION");
+        assert.match(err.message, /silent deletion of negative constraints is forbidden/);
+        return true;
+      },
+      `Trivial negative constraint wipeout attempt "${trivial}" must be rejected`,
+    );
+  }
 
   // Behavior 2: /note-skills-flush command must inherit existing negative constraints instead of overwriting with None specified
   const { commandHandlers } = extensionHarness();
@@ -145,19 +157,28 @@ test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV
   pm.init({ project_id: "adv-03", canonical_state_file: "state.yaml" });
 
   // 1. Attempting to flush a working context that asserts P0 is complete contradicts canonical state -> CONFLICT
-  assert.throws(
-    () =>
-      pm.flushWorkingContext({
-        content: validContextBody("Complete milestone P0", "milestone P0 is complete and verified"),
-        covered_through_entry_id: "turn-003a",
-      }),
-    (err: unknown) => {
-      assert.ok(err instanceof ProjectMemoryError);
-      assert.equal(err.code, "CONFLICT");
-      assert.match(err.message, /working context contradicts canonical milestone "P0"/);
-      return true;
-    },
-  );
+  const contradictionPhrases = [
+    "milestone P0 is complete",
+    "Milestone P0 has been completed and verified",
+    "P0 completion has been achieved",
+  ];
+
+  for (const phrase of contradictionPhrases) {
+    assert.throws(
+      () =>
+        pm.flushWorkingContext({
+          content: validContextBody("Complete milestone P0", phrase),
+          covered_through_entry_id: "turn-003a",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof ProjectMemoryError);
+        assert.equal(err.code, "CONFLICT");
+        assert.match(err.message, /working context contradicts canonical milestone "P0"/);
+        return true;
+      },
+      `Contradiction phrase "${phrase}" must trigger CONFLICT`,
+    );
+  }
 
   // 2. Flush a valid context
   pm.flushWorkingContext({
@@ -168,7 +189,7 @@ test("P0-E (3/12): Canonical truth overrides working projection on conflict (INV
   // 3. Now simulate hand-editing PROJECT_CONTEXT on disk to contradict canonical state.yaml
   const ctxFile = projectContextPath(cwd);
   const currentText = fs.readFileSync(ctxFile, "utf8");
-  fs.writeFileSync(ctxFile, currentText.replace("Continue milestone P0 implementation", "milestone P0 is complete"));
+  fs.writeFileSync(ctxFile, currentText.replace("Continue milestone P0 implementation", "milestone P0 is completed and verified"));
 
   // 4. before_agent_start must detect the canonical conflict, fail closed, and suppress operational state!
   const { events } = extensionHarness();
@@ -239,17 +260,20 @@ test("P0-E (4/12): External file edit by human triggers CONTEXT_CONFLICT; base h
   );
 });
 
-test("P0-E (5/12): Branch drift fail-closed: git branch auto-collected and operational body suppressed on drift", () => {
+test("P0-E (5/12): Branch drift fail-closed (including Git worktree .git file): git branch auto-collected and operational body suppressed", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-adv-05-"));
   const pm = new ProjectMemory(cwd);
   pm.init({ project_id: "adv-05" });
 
-  // Initialize git repository structure
-  fs.mkdirSync(path.join(cwd, ".git", "refs", "heads"), { recursive: true });
-  fs.writeFileSync(path.join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n");
-  fs.writeFileSync(path.join(cwd, ".git", "refs", "heads", "main"), "1122334455667788990011223344556677889900\n");
+  // Simulate Git worktree: .git is a file pointing to a gitdir!
+  const actualGitDir = fs.mkdtempSync(path.join(os.tmpdir(), "actual-git-dir-"));
+  fs.mkdirSync(path.join(actualGitDir, "refs", "heads"), { recursive: true });
+  fs.writeFileSync(path.join(actualGitDir, "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(actualGitDir, "refs", "heads", "main"), "1122334455667788990011223344556677889900\n");
 
-  // Flush without passing git_branch -> service must automatically collect branch 'main'
+  fs.writeFileSync(path.join(cwd, ".git"), `gitdir: ${actualGitDir}\n`);
+
+  // Flush without passing git_branch -> service must automatically resolve worktree and collect 'main'
   const receipt = pm.flushWorkingContext({
     content: validContextBody("Feature Secret", "Deploy feature secret to production"),
     covered_through_entry_id: "t-05",
@@ -270,8 +294,8 @@ test("P0-E (5/12): Branch drift fail-closed: git branch auto-collected and opera
     sessionManager: { getSessionId: () => "s", getLeafId: () => "l" },
   };
 
-  // Mock workspace switched to branch 'release-v2'
-  fs.writeFileSync(path.join(cwd, ".git", "HEAD"), "ref: refs/heads/release-v2\n");
+  // Switch branch in the worktree gitdir
+  fs.writeFileSync(path.join(actualGitDir, "HEAD"), "ref: refs/heads/release-v2\n");
 
   const result = (events.get("before_agent_start")!({ prompt: "Status" }, ctx)) as {
     message: { content: string };
@@ -327,6 +351,33 @@ test("P0-E (6/12): Corrupted/invalid PROJECT_CONTEXT.md fails closed on read bou
       return true;
     },
   );
+
+  // 3. Syntactically valid frontmatter but invalid authority fails closed on read
+  const invalidAuthority = [
+    "---",
+    "schema_version: 1",
+    "project_id: adv-06",
+    "authority: canonical",
+    "context_revision: 1",
+    "checkpoint_id: CP-0001",
+    "source_session_id: s",
+    "covered_through_entry_id: e",
+    "base_context_sha256: ''",
+    "generated_at: '2026-09-03T10:00:00.000Z'",
+    "---",
+    validContextBody(),
+  ].join("\n");
+  fs.writeFileSync(projectContextPath(cwd), invalidAuthority);
+
+  assert.throws(
+    () => pm.readWorkingContext(),
+    (err: unknown) => {
+      assert.ok(err instanceof ProjectMemoryError);
+      assert.equal(err.code, "POLICY_VIOLATION");
+      assert.match(err.message, /authority must be "working_projection"/);
+      return true;
+    },
+  );
 });
 
 test("P0-E (7/12): Tampered receipt metadata fails verification and forces Mode B (INV-COMPACT-01)", () => {
@@ -338,10 +389,11 @@ test("P0-E (7/12): Tampered receipt metadata fails verification and forces Mode 
     content: validContextBody("Task", "Step"),
     covered_through_entry_id: "turn-007",
     source_session_id: "session-07",
+    git_branch: "main",
   });
   assert.equal(receipt.status, "FLUSH_VERIFIED");
 
-  // Attack: tamper receipt JSON's covered_through_entry_id while checkpoint bytes are untouched
+  // Attack 1: tamper receipt JSON's covered_through_entry_id while checkpoint bytes are untouched
   const rFile = flushReceiptPath(cwd, receipt.checkpoint_id);
   const rData = JSON.parse(fs.readFileSync(rFile, "utf8"));
   rData.covered_through_entry_id = "falsified-turn-id";
@@ -349,6 +401,13 @@ test("P0-E (7/12): Tampered receipt metadata fails verification and forces Mode 
 
   // 1. verifyFlushReceipt must detect metadata tampering and return null
   assert.equal(pm.verifyFlushReceipt(receipt.checkpoint_id), null);
+
+  // Attack 2: delete git_branch from receipt JSON while checkpoint has git_branch
+  const rData2 = JSON.parse(fs.readFileSync(rFile, "utf8"));
+  rData2.covered_through_entry_id = "turn-007"; // restore covered
+  delete rData2.git_branch; // delete git_branch
+  fs.writeFileSync(rFile, JSON.stringify(rData2, null, 2));
+  assert.equal(pm.verifyFlushReceipt(receipt.checkpoint_id), null, "deleting git_branch from receipt must fail verification");
 
   // 2. Compaction must fail-closed into Mode B (emergency safe compaction)
   const { events, entries } = extensionHarness();
@@ -376,14 +435,14 @@ test("P0-E (7/12): Tampered receipt metadata fails verification and forces Mode 
   assert.ok(emergencyLog, "must record unverified_receipt emergency compaction entry");
 });
 
-test("P0-E (8/12): Uncovered entry ancestry strictly forces Mode B Emergency Safe Compaction", () => {
+test("P0-E (8/12): Uncheckpointed toolResult eviction is strictly prevented (INV-COMPACT-01 Mode B fallback)", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-adv-08-"));
   const pm = new ProjectMemory(cwd);
   pm.init({ project_id: "adv-08" });
 
   pm.flushWorkingContext({
     content: validContextBody("Task", "Step"),
-    covered_through_entry_id: "covered-turn-999",
+    covered_through_entry_id: "turn-covered",
     source_session_id: "session-08",
   });
 
@@ -395,26 +454,45 @@ test("P0-E (8/12): Uncovered entry ancestry strictly forces Mode B Emergency Saf
     sessionManager: { getSessionId: () => "session-08", getLeafId: () => "l-08" },
   };
 
-  // The branch entries do NOT contain "covered-turn-999" (ancestry cannot be proven!)
-  const compactEvent = {
+  // Sol counterexample scenario:
+  // turn-covered is an assistant toolCall.
+  // Immediately following it is turn-toolResult (NOT covered by checkpoint!).
+  // Then turn-user.
+  // Previously, toolResult was jumped over and turn-user was kept, evicting the uncheckpointed toolResult!
+  const sequenceWithUncheckpointedToolResult = {
     type: "session_before_compact",
     reason: "threshold" as const,
     willRetry: false,
     signal: new AbortController().signal,
-    preparation: { firstKeptEntryId: "entry-010", tokensBefore: 1000 } as never,
+    preparation: { firstKeptEntryId: "turn-user", tokensBefore: 1000 } as never,
     branchEntries: [
-      { id: "entry-001", type: "message", message: { role: "user" } },
-      { id: "entry-002", type: "message", message: { role: "assistant" } },
+      { id: "turn-covered", type: "message", message: { role: "assistant" } },
+      { id: "turn-toolResult", type: "message", message: { role: "toolResult" } }, // uncheckpointed!
+      { id: "turn-user", type: "message", message: { role: "user" } },
     ],
   };
 
-  const result = events.get("session_before_compact")!(compactEvent, ctx);
-  // UNCONDITIONALLY Mode B (return undefined)
-  assert.equal(result, undefined);
-  const log = entries.find(
-    (e) => (e as { data?: { cause?: string } }).data?.cause === "covered_entry_not_on_current_ancestry",
+  const res1 = events.get("session_before_compact")!(sequenceWithUncheckpointedToolResult, ctx);
+  // Must unconditionally fallback to Mode B!
+  assert.equal(res1, undefined, "must refuse Mode A when uncheckpointed toolResult follows covered entry");
+  const log1 = entries.find(
+    (e) => (e as { data?: { cause?: string } }).data?.cause === "uncheckpointed_tool_result_after_covered_entry",
   );
-  assert.ok(log, "must record ancestry failure log and refuse Mode A");
+  assert.ok(log1, "must record uncheckpointed_tool_result log");
+
+  // Also verify: covered entry not present on current ancestry -> Mode B
+  const missingAncestryEvent = {
+    type: "session_before_compact",
+    reason: "threshold" as const,
+    willRetry: false,
+    signal: new AbortController().signal,
+    preparation: { firstKeptEntryId: "e-01", tokensBefore: 1000 } as never,
+    branchEntries: [
+      { id: "e-01", type: "message", message: { role: "user" } },
+    ],
+  };
+  const res2 = events.get("session_before_compact")!(missingAncestryEvent, ctx);
+  assert.equal(res2, undefined, "must refuse Mode A when covered entry missing from ancestry");
 });
 
 test("P0-E (9/12): Unresolved capture candidates block compaction once with warning", () => {
@@ -443,36 +521,24 @@ test("P0-E (9/12): Unresolved capture candidates block compaction once with warn
   assert.equal(secondAttempt, undefined);
 });
 
-test("P0-E (10/12): External secret injection blocked on read boundary (safe persistent-state boundary)", () => {
+test("P0-E (10/12): External secret injection blocked on read boundary (both metadata and body)", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "note-skills-adv-10-"));
   const pm = new ProjectMemory(cwd);
   pm.init({ project_id: "adv-10" });
 
-  // 1. Writer path blocks secret
-  assert.throws(
-    () =>
-      pm.flushWorkingContext({
-        content: validContextBody("Secret task", "Step") + "\ntoken=supersecretvalue123456",
-        covered_through_entry_id: "t-10",
-      }),
-    (err: unknown) => {
-      assert.ok(err instanceof ProjectMemoryError);
-      assert.equal(err.code, "POLICY_VIOLATION");
-      return true;
-    },
-  );
-
-  // 2. Flush a valid context
+  // 1. Flush a valid context
   pm.flushWorkingContext({
     content: validContextBody("Clean task", "Step"),
     covered_through_entry_id: "t-10-clean",
   });
 
-  // 3. Hand-edit PROJECT_CONTEXT on disk to inject secret
+  // 2. Hand-edit PROJECT_CONTEXT on disk to inject secret into frontmatter metadata (Sol P1-1 scenario)
   const ctxFile = projectContextPath(cwd);
-  fs.appendFileSync(ctxFile, "\nAWS token=supersecretvalue123456\n");
+  const currentText = fs.readFileSync(ctxFile, "utf8");
+  const frontmatterSecretText = currentText.replace("authority: working_projection", "authority: working_projection\ngit_branch: \"token=supersecretvalue123456\"");
+  fs.writeFileSync(ctxFile, frontmatterSecretText);
 
-  // 4. Read boundary must fail closed with POLICY_VIOLATION
+  // 3. Read boundary must detect secret in frontmatter metadata and fail closed!
   assert.throws(
     () => pm.readWorkingContext(),
     (err: unknown) => {
@@ -483,7 +549,7 @@ test("P0-E (10/12): External secret injection blocked on read boundary (safe per
     },
   );
 
-  // 5. before_agent_start must catch and refuse injection
+  // 4. before_agent_start must catch and refuse injection
   const { events } = extensionHarness();
   const ctx = {
     cwd,
